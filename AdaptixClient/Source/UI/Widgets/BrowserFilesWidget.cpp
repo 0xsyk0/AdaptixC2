@@ -1,9 +1,14 @@
 #include <Agent/Agent.h>
 #include <Utils/FileSystem.h>
+#include <Utils/NonBlockingDialogs.h>
 #include <UI/Widgets/AdaptixWidget.h>
 #include <UI/Widgets/BrowserFilesWidget.h>
 #include <UI/Widgets/ConsoleWidget.h>
+#include <UI/Widgets/DockWidgetRegister.h>
+#include <Client/AuthProfile.h>
 #include <Client/AxScript/AxScriptManager.h>
+
+REGISTER_DOCK_WIDGET(BrowserFilesWidget, "Browser Files", false)
 
 void BrowserFileData::CreateBrowserFileData(const QString &path, const int os)
 {
@@ -44,7 +49,7 @@ void BrowserFileData::SetStored(const bool stored)
 
 
 
-BrowserFilesWidget::BrowserFilesWidget(Agent* a)
+BrowserFilesWidget::BrowserFilesWidget(const AdaptixWidget* w, Agent* a) : DockTab(QString("Files [%1]").arg( a->data.Id ), w->GetProfile()->GetProject())
 {
     agent = a;
     this->createUI();
@@ -58,6 +63,8 @@ BrowserFilesWidget::BrowserFilesWidget(Agent* a)
     connect(tableWidget,       &QTableWidget::doubleClicked,              this, &BrowserFilesWidget::handleTableDoubleClicked);
     connect(treeBrowserWidget, &QTreeWidget::itemDoubleClicked,           this, &BrowserFilesWidget::handleTreeDoubleClicked);
     connect(tableWidget,       &QTableWidget::customContextMenuRequested, this, &BrowserFilesWidget::handleTableMenu );
+
+    this->dockWidget->setWidget(this);
 }
 
 BrowserFilesWidget::~BrowserFilesWidget() = default;
@@ -318,7 +325,7 @@ void BrowserFilesWidget::updateFileData(BrowserFileData* currenFileData, const Q
         currenFileData->TreeItem->takeChildren();
         currenFileData->Files.clear();
 
-        for ( QJsonValue value : jsonArray ) {
+        for ( const QJsonValue& value : jsonArray ) {
             QJsonObject jsonObject = value.toObject();
             QString filename = jsonObject["b_filename"].toString();
             qint64  b_size   = jsonObject["b_size"].toDouble();
@@ -348,17 +355,19 @@ void BrowserFilesWidget::updateFileData(BrowserFileData* currenFileData, const Q
             currenFileData->Files.push_back(childData);
         }
 
-        for( QString oldPath : oldFiles.keys() ) {
-            BrowserFileData data = oldFiles[oldPath];
+        for( const QString& oldPath : oldFiles.keys() ) {
+            const BrowserFileData& data = oldFiles[oldPath];
 
             QString oldFullpath = data.Fullpath + "\\";
 
-            for(QString storeKey : browserStore.keys())
+            QStringList keysToRemove;
+            for(const QString& storeKey : browserStore.keys())
                 if (storeKey.startsWith(oldFullpath, Qt::CaseInsensitive))
-                    browserStore.remove(storeKey);
+                    keysToRemove.append(storeKey);
+            for(const QString& key : keysToRemove)
+                browserStore.remove(key);
 
             browserStore.remove(data.Fullpath);
-            oldFiles.remove(oldPath);
         }
     }
     else {
@@ -368,7 +377,7 @@ void BrowserFilesWidget::updateFileData(BrowserFileData* currenFileData, const Q
         currenFileData->TreeItem->takeChildren();
         currenFileData->Files.clear();
 
-        for ( QJsonValue value : jsonArray ) {
+        for ( const QJsonValue& value : jsonArray ) {
             QJsonObject jsonObject = value.toObject();
             int     b_type   = jsonObject["b_is_dir"].toBool();
             QString filename = jsonObject["b_filename"].toString();
@@ -408,17 +417,19 @@ void BrowserFilesWidget::updateFileData(BrowserFileData* currenFileData, const Q
             currenFileData->Files.push_back(childData);
         }
 
-        for( QString oldPath : oldFiles.keys() ) {
-            BrowserFileData data = oldFiles[oldPath];
+        for( const QString& oldPath : oldFiles.keys() ) {
+            const BrowserFileData& data = oldFiles[oldPath];
 
             QString oldFullpath = data.Fullpath + "/";
 
-            for(QString storeKey : browserStore.keys())
+            QStringList keysToRemove;
+            for(const QString& storeKey : browserStore.keys())
                 if (storeKey.startsWith(oldFullpath, Qt::CaseSensitive))
-                    browserStore.remove(storeKey);
+                    keysToRemove.append(storeKey);
+            for(const QString& key : keysToRemove)
+                browserStore.remove(key);
 
             browserStore.remove(data.Fullpath);
-            oldFiles.remove(oldPath);
         }
     }
 }
@@ -464,10 +475,10 @@ void BrowserFilesWidget::tableShowItems(QVector<BrowserFileData*> files ) const
             item_Mode->setFlags( item_Mode->flags() ^ Qt::ItemIsEditable );
 
             QTableWidgetItem* item_User = new QTableWidgetItem(files[row]->User);
-            item_User->setFlags( item_Mode->flags() ^ Qt::ItemIsEditable );
+            item_User->setFlags( item_User->flags() ^ Qt::ItemIsEditable );
 
             QTableWidgetItem* item_Group = new QTableWidgetItem(files[row]->Group);
-            item_Group->setFlags( item_Mode->flags() ^ Qt::ItemIsEditable );
+            item_Group->setFlags( item_Group->flags() ^ Qt::ItemIsEditable );
 
             tableWidget->setItem(row, 0, item_Name);
             tableWidget->setItem(row, 1, item_Mode);
@@ -502,7 +513,7 @@ void BrowserFilesWidget::cdBrowser(const QString &path)
         this->setStoredFileData(path, fileData);
     } else {
         statusLabel->setText("");
-        emit agent->adaptixWidget->eventFileBrowserList(agent->data.Id, path);
+        Q_EMIT agent->adaptixWidget->eventFileBrowserList(agent->data.Id, path);
     }
 }
 
@@ -511,14 +522,14 @@ void BrowserFilesWidget::cdBrowser(const QString &path)
 void BrowserFilesWidget::onDisks() const
 {
     statusLabel->setText("");
-    emit agent->adaptixWidget->eventFileBrowserDisks(agent->data.Id);
+    Q_EMIT agent->adaptixWidget->eventFileBrowserDisks(agent->data.Id);
 }
 
 void BrowserFilesWidget::onList() const
 {
     QString path = inputPath->text();
     statusLabel->setText("");
-    emit agent->adaptixWidget->eventFileBrowserList(agent->data.Id, path);
+    Q_EMIT agent->adaptixWidget->eventFileBrowserList(agent->data.Id, path);
 }
 
 void BrowserFilesWidget::onParent()
@@ -556,11 +567,11 @@ void BrowserFilesWidget::onReload() const
             path = "./";
 
         statusLabel->setText("");
-        emit agent->adaptixWidget->eventFileBrowserList(agent->data.Id, path);
+        Q_EMIT agent->adaptixWidget->eventFileBrowserList(agent->data.Id, path);
     }
     else {
         statusLabel->setText("");
-        emit agent->adaptixWidget->eventFileBrowserList(agent->data.Id, currentPath);
+        Q_EMIT agent->adaptixWidget->eventFileBrowserList(agent->data.Id, currentPath);
     }
 }
 
@@ -576,12 +587,18 @@ void BrowserFilesWidget::onUpload() const
     else
         remotePath += "/";
 
-    QString filePath = QFileDialog::getOpenFileName(nullptr, "Select file", QDir::homePath());
-    if ( filePath.isEmpty())
-        return;
+    QString baseDir = QDir::homePath();
+    if (agent && agent->adaptixWidget && agent->adaptixWidget->GetProfile())
+        baseDir = agent->adaptixWidget->GetProfile()->GetProjectDir();
 
-    statusLabel->setText("");
-    emit agent->adaptixWidget->eventFileBrowserUpload(agent->data.Id, remotePath, filePath);
+    NonBlockingDialogs::getOpenFileName(const_cast<BrowserFilesWidget*>(this), "Select file", baseDir, "All Files (*.*)",
+        [this, remotePath](const QString& filePath) {
+            if (filePath.isEmpty())
+                return;
+
+            statusLabel->setText("");
+            Q_EMIT agent->adaptixWidget->eventFileBrowserUpload(agent->data.Id, remotePath, filePath);
+    });
 }
 
 void BrowserFilesWidget::handleTableDoubleClicked(const QModelIndex &index)

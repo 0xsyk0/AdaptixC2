@@ -4,53 +4,95 @@
 #include <main.h>
 #include <UI/Widgets/AdaptixWidget.h>
 #include <Client/AuthProfile.h>
+#include <Utils/CustomElements.h>
 
 class AxContainerWrapper;
+class BuildWorker;
 
 class DialogAgent : public QDialog
 {
-    QGridLayout*    mainGridLayout      = nullptr;
-    QGridLayout*    stackGridLayout     = nullptr;
-    QHBoxLayout*    hLayoutBottom       = nullptr;
-    QFrame*         line_1              = nullptr;
-    QSpacerItem*    horizontalSpacer    = nullptr;
-    QSpacerItem*    horizontalSpacer_2  = nullptr;
-    QSpacerItem*    horizontalSpacer_3  = nullptr;
+Q_OBJECT
+
     QLabel*         listenerLabel       = nullptr;
     QLineEdit*      listenerInput       = nullptr;
+    QLineEdit*      listenerDisplayEdit = nullptr;
+    QPushButton*    listenerSelectBtn   = nullptr;
+    QDialog*        listenerPopupDialog = nullptr;
+    QListWidget*    listenerListWidget  = nullptr;
+    QPushButton*    btnMoveUp           = nullptr;
+    QPushButton*    btnMoveDown         = nullptr;
+    QWidget*        listenerSelectionWidget = nullptr;
     QLabel*         agentLabel          = nullptr;
     QComboBox*      agentCombobox       = nullptr;
-    QPushButton*    buttonLoad          = nullptr;
-    QPushButton*    buttonSave          = nullptr;
-    QPushButton*    closeButton         = nullptr;
-    QPushButton*    generateButton      = nullptr;
+    QLabel*         profileLabel        = nullptr;
+    QAction*        actionSaveProfile   = nullptr;
+    QLineEdit*      inputProfileName    = nullptr;
+    bool            profileNameManuallyEdited = false;
+    QPushButton*    buildButton         = nullptr;
     QGroupBox*      agentConfigGroupbox = nullptr;
     QStackedWidget* configStackWidget   = nullptr;
 
+    QWidget*        buildLogPanel       = nullptr;
+    QPushButton*    collapseButton      = nullptr;
+    QTextEdit*      buildLogOutput      = nullptr;
+    QThread*        buildThread         = nullptr;
+    BuildWorker*    buildWorker         = nullptr;
+
+    QLabel*           label_Profiles    = nullptr;
+    CardListWidget*   cardWidget        = nullptr;
+    QMenu*            menuContext       = nullptr;
+    QPushButton*      buttonNewProfile  = nullptr;
+    QPushButton*      buttonLoad        = nullptr;
+    QPushButton*      buttonSave        = nullptr;
+
+    AdaptixWidget* adaptixWidget = nullptr;
     AuthProfile authProfile;
     QString     listenerName;
     QString     listenerType;
+    QVector<ListenerData> availableListeners;
+    QMap<QString, AgentTypeInfo> agentTypes;
 
     QStringList agents;
-    QMap<QString, QWidget*> widgets;
-    QMap<QString, AxContainerWrapper*> containers;
+    QMap<QString, AxUI> ax_uis;
+
+    void regenerateAgentUI(const QString &agentName, const QStringList &selectedListeners);
 
     void createUI();
+    void loadProfiles();
+    void saveProfile(const QString &profileName, const QString &agentName, const QString &configData);
+    QString generateUniqueProfileName(const QString &baseName);
 
 public:
-    explicit DialogAgent(const QString &listenerName, const QString &listenerType);
+    explicit DialogAgent(AdaptixWidget* adaptixWidget, const QString &listenerName, const QString &listenerType);
     ~DialogAgent() override;
 
-    void AddExAgents(const QStringList &agents, const QMap<QString, QWidget*> &widgets, const QMap<QString, AxContainerWrapper*> &containers);
+    void AddExAgents(const QStringList &agents, const QMap<QString, AxUI> &uis);
     void SetProfile(const AuthProfile &profile);
+    void SetAvailableListeners(const QVector<ListenerData> &listeners);
+    void SetAgentTypes(const QMap<QString, AgentTypeInfo> &types);
     void Start();
 
-protected slots:
+protected Q_SLOTS:
     void onButtonLoad();
     void onButtonSave();
     void changeConfig(const QString &agentName);
-    void onButtonGenerate();
-    void onButtonClose();
+    void onButtonNewProfile();
+    void onProfileSelected();
+    void handleProfileContextMenu(const QPoint &pos);
+    void onProfileRemove();
+    void onProfileRename();
+    void onProfileNameEdited(const QString &text);
+    void onSaveProfileToggled(bool checked);
+    void onButtonBuild();
+    void onBuildConnected();
+    void onBuildMessage(const QString &msg);
+    void onBuildFinished();
+    void stopBuild();
+    void onListenerSelectionChanged(const QListWidgetItem *item);
+    void onMoveListenerUp();
+    void onMoveListenerDown();
+    void showListenerPopup();
+    void updateListenerDisplay();
 };
 
 #endif

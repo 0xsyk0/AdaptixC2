@@ -5,6 +5,7 @@
 
 class AuthProfile;
 class TunnelWorker;
+class SocksHandshakeWorker;
 
 class TunnelEndpoint : public QObject {
 Q_OBJECT
@@ -28,6 +29,9 @@ Q_OBJECT
     };
     QMap<QString, ChannelHandle>  tunnelChannels;
 
+    void startWorker(QTcpSocket* clientSock, const QString& tunnelData);
+    void startHandshakeWorker(QTcpSocket* clientSock, const QString& type);
+
 public:
     TunnelEndpoint(QObject* parent = nullptr);
     ~TunnelEndpoint() override;
@@ -41,11 +45,11 @@ public:
 
     void StopChannel(const QString& tunnelId);
 
-private slots:
+private Q_SLOTS:
     void onStartLpfChannel();
-    void onStartSocks4Channel();
-    void onStartSocks5Channel();
-    void onStartSocks5AuthChannel();
+    void onStartSocksChannel();
+    void onWorkerReady(TunnelWorker* worker, const QString& channelId);
+    void onHandshakeFailed();
 };
 
 #endif

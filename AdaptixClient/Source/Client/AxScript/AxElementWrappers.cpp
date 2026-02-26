@@ -2,6 +2,7 @@
 #include <Client/AxScript/AxScriptEngine.h>
 #include <Client/AxScript/AxScriptManager.h>
 #include <Agent/Agent.h>
+#include <Utils/NonBlockingDialogs.h>
 
 #include <QJSEngine>
 #include <QJsonObject>
@@ -10,8 +11,6 @@
 #include <QDateEdit>
 #include <QDialog>
 #include <QMenu>
-
-
 
 /// MENU
 
@@ -305,7 +304,7 @@ bool AxCheckBoxWrapper::isChecked() const { return check->isChecked(); }
 
 void AxCheckBoxWrapper::setChecked(const bool checked) const { check->setChecked(checked); }
 
-void AxSelectorFile::setPlaceholder(const QString& text) const { selector->input->setPlaceholderText(text); }
+void AxSelectorFile::setPlaceholder(const QString& text) const { lineEdit->setPlaceholderText(text); }
 
 /// LABEL
 
@@ -458,12 +457,14 @@ void AxTableWidgetWrapper::setText(const int row, const int column, const QStrin
 void AxTableWidgetWrapper::setReadOnly(const bool read)
 {
     for(int rowIndex = 0; rowIndex < table->rowCount(); rowIndex++) {
-        for(int columnIndex = 0; columnIndex < table->rowCount(); columnIndex++) {
+        for(int columnIndex = 0; columnIndex < table->columnCount(); columnIndex++) {
             auto item = table->item(rowIndex, columnIndex);
-            if (read)
-                item->setFlags(item->flags() & ~Qt::ItemIsEditable);
-            else
-                item->setFlags(item->flags() | Qt::ItemIsEditable);
+            if (item) {
+                if (read)
+                    item->setFlags(item->flags() & ~Qt::ItemIsEditable);
+                else
+                    item->setFlags(item->flags() | Qt::ItemIsEditable);
+            }
         }
     }
 }
@@ -523,8 +524,8 @@ AxListWidgetWrapper::AxListWidgetWrapper(QListWidget* widget, QJSEngine* engine,
 
     connect(list, &QListWidget::currentTextChanged, this, &AxListWidgetWrapper::currentTextChanged);
     connect(list, &QListWidget::currentRowChanged,  this, &AxListWidgetWrapper::currentRowChanged);
-    connect(list, &QListWidget::itemClicked,        this, [this](const QListWidgetItem* item) { if (item) emit itemClickedText(item->text()); });
-    connect(list, &QListWidget::itemDoubleClicked,  this, [this](const QListWidgetItem* item) { if (item) emit itemDoubleClickedText(item->text()); });
+    connect(list, &QListWidget::itemClicked,        this, [this](const QListWidgetItem* item) { if (item) Q_EMIT itemClickedText(item->text()); });
+    connect(list, &QListWidget::itemDoubleClicked,  this, [this](const QListWidgetItem* item) { if (item) Q_EMIT itemDoubleClickedText(item->text()); });
 }
 
 QVariant AxListWidgetWrapper::jsonMarshal() const
@@ -555,7 +556,7 @@ QJSValue AxListWidgetWrapper::items()
     for (int i = 0; i < list->count(); ++i) {
         QListWidgetItem* item = list->item(i);
         if (item)
-             jsArray.setProperty(i, item->text());
+            jsArray.setProperty(i, item->text());
     }
     return jsArray;
 }
@@ -588,9 +589,13 @@ void AxListWidgetWrapper::addItems(const QJSValue &items)
     }
 }
 
-void AxListWidgetWrapper::clear() { list->clear(); }
-
 void AxListWidgetWrapper::removeItem(const int index) { delete list->takeItem(index); }
+
+QString AxListWidgetWrapper::itemText(const int index) const
+{
+    QListWidgetItem* item = list->item(index);
+    return item ? item->text() : QString();
+}
 
 void AxListWidgetWrapper::setItemText(const int index, const QString& text)
 {
@@ -599,11 +604,7 @@ void AxListWidgetWrapper::setItemText(const int index, const QString& text)
         item->setText(text);
 }
 
-QString AxListWidgetWrapper::itemText(const int index) const
-{
-    QListWidgetItem* item = list->item(index);
-    return item ? item->text() : QString();
-}
+void AxListWidgetWrapper::clear() { list->clear(); }
 
 int AxListWidgetWrapper::count() const { return list->count(); }
 
@@ -858,6 +859,7 @@ AxDialogWrapper::AxDialogWrapper(const QString& title, QWidget* parent) : QObjec
 {
     dialog = new QDialog(parent);
     dialog->setWindowTitle(title);
+    dialog->setProperty("Main", "base");
     layout = new QVBoxLayout(dialog);
 
     buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
@@ -904,38 +906,153 @@ void AxDialogWrapper::setButtonsText(const QString &ok_text, const QString &canc
     }
 }
 
+
+
+#include <UI/Widgets/AdaptixWidget.h>
+#include <Client/AuthProfile.h>
+
+AxExtDialogWrapper::AxExtDialogWrapper(AdaptixWidget* w, const QString& title) : QObject(nullptr)
+{
+    adaptixWidget = w;
+    QString project = w->GetProfile()->GetProject();
+
+    dialogId = title + "-" + project;
+    dialogTitle = title;
+
+    dialog = new QDialog();
+    dialog->setWindowTitle(title);
+    dialog->setProperty("Main", "base");
+    layout = new QVBoxLayout(dialog);
+
+    buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+
+    layout->addWidget(buttons);
+    dialog->setLayout(layout);
+
+    connect(buttons, &QDialogButtonBox::accepted, dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
+
+    if (adaptixWidget) {
+        adaptixWidget->AddExtDock(dialogId, title, [this]() {
+            show();
+        });
+    }
+}
+
+AxExtDialogWrapper::~AxExtDialogWrapper()
+{
+    if (adaptixWidget)
+        adaptixWidget->RemoveExtDock(dialogId);
+
+    if (dialog) {
+        dialog->close();
+        dialog->deleteLater();
+    }
+}
+
+void AxExtDialogWrapper::setLayout(QObject* layoutWrapper)
+{
+    if (userLayout) {
+        layout->removeItem(userLayout);
+        delete userLayout;
+        userLayout = nullptr;
+    }
+
+    if (auto* grid = qobject_cast<AxGridLayoutWrapper*>(layoutWrapper))
+        userLayout = grid->layout();
+    else if (auto* box = qobject_cast<AxBoxLayoutWrapper*>(layoutWrapper))
+        userLayout = box->layout();
+
+    if (userLayout)
+        layout->insertLayout(0, userLayout);
+}
+
+void AxExtDialogWrapper::setSize(const int w, const int h) const { dialog->resize(w, h); }
+
+bool AxExtDialogWrapper::exec() const { return dialog->exec() == QDialog::Accepted; }
+
+void AxExtDialogWrapper::show() const { dialog->show(); }
+
+void AxExtDialogWrapper::close() const { dialog->close(); }
+
+void AxExtDialogWrapper::setButtonsText(const QString &ok_text, const QString &cancel_text) const
+{
+    QPushButton *okButton = buttons->button(QDialogButtonBox::Ok);
+    if (okButton) {
+        okButton->setText(ok_text);
+    }
+    QPushButton *cancelButton = buttons->button(QDialogButtonBox::Cancel);
+    if (cancelButton) {
+        cancelButton->setText(cancel_text);
+    }
+}
+
 /// FILE SELECTOR
 
-AxSelectorFile::AxSelectorFile(FileSelector* selector, QObject* parent) : QObject(parent), selector(selector) {}
+AxSelectorFile::AxSelectorFile(QLineEdit* edit, QObject* parent) : QObject(parent), lineEdit(edit)
+{
+    lineEdit->setReadOnly(true);
 
-FileSelector* AxSelectorFile::widget() const { return selector; }
+    auto action = lineEdit->addAction(QIcon(":/icons/folder"), QLineEdit::TrailingPosition);
+    connect(action, &QAction::triggered, this, &AxSelectorFile::onSelectFile);
+}
 
-QVariant AxSelectorFile::jsonMarshal() const { return selector->content; }
+QLineEdit* AxSelectorFile::widget() const { return lineEdit; }
+
+QVariant AxSelectorFile::jsonMarshal() const { return content; }
 
 void AxSelectorFile::jsonUnmarshal(const QVariant& value)
 {
-    selector->content = value.toString();
-    selector->input->setText("Selected...");
+    content = value.toString();
+    lineEdit->setText("Selected...");
+}
+
+void AxSelectorFile::onSelectFile()
+{
+    NonBlockingDialogs::getOpenFileName(lineEdit, "Select a file", "", "All Files (*.*)",
+        [this](const QString& selectedFile) {
+            if (selectedFile.isEmpty())
+                return;
+
+            lineEdit->setText(selectedFile);
+
+            QFile file(selectedFile);
+            if (!file.open(QIODevice::ReadOnly))
+                return;
+
+            QByteArray fileData = file.readAll();
+            file.close();
+
+            content = QString::fromUtf8(fileData.toBase64());
+        });
 }
 
 /// SELECTOR CREDENTIALS
 
-AxDialogCreds::AxDialogCreds(const QJSValue &headers, QVector<CredentialData> vecCreds, QTableWidget *tableWidget, QPushButton *button, QWidget *parent) : tableWidget(tableWidget), chooseButton(button)
+AxDialogCreds::AxDialogCreds(const QJSValue &headers, const QVector<CredentialData> &vecCreds, QWidget *parent)
 {
-    tableWidget->setAlternatingRowColors( true );
-    tableWidget->setAutoFillBackground( false );
-    tableWidget->setShowGrid( false );
-    tableWidget->setSortingEnabled( true );
-    tableWidget->setWordWrap( true );
-    tableWidget->setCornerButtonEnabled( true );
-    tableWidget->setSelectionBehavior( QAbstractItemView::SelectRows );
-    tableWidget->setFocusPolicy( Qt::NoFocus );
-    tableWidget->horizontalHeader()->setSectionResizeMode( QHeaderView::Stretch );
-    tableWidget->horizontalHeader()->setCascadingSectionResizes( true );
-    tableWidget->horizontalHeader()->setHighlightSections( false );
-    tableWidget->verticalHeader()->setVisible( false );
+    this->setProperty("Main", "base");
 
-    chooseButton->setText("Choose");
+    tableView = new QTableView(this);
+    tableView->setAlternatingRowColors(true);
+    tableView->setShowGrid(false);
+    tableView->setSortingEnabled(true);
+    tableView->setWordWrap(true);
+    tableView->setSelectionBehavior(QAbstractItemView::SelectRows);
+    tableView->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    tableView->setFocusPolicy(Qt::NoFocus);
+    tableView->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    tableView->horizontalHeader()->setCascadingSectionResizes(true);
+    tableView->horizontalHeader()->setHighlightSections(false);
+    tableView->verticalHeader()->setVisible(false);
+    tableView->setEditTriggers(QAbstractItemView::NoEditTriggers);
+
+    tableModel = new AxCredsTableModel(this);
+    proxyModel = new AxCredsFilterProxyModel(this);
+    proxyModel->setSourceModel(tableModel);
+    tableView->setModel(proxyModel);
+
+    chooseButton = new QPushButton("Choose", this);
 
     spacer_1 = new QSpacerItem(40, 20, QSizePolicy::Expanding, QSizePolicy::Maximum);
     spacer_2 = new QSpacerItem(40, 20, QSizePolicy::Expanding, QSizePolicy::Maximum);
@@ -951,7 +1068,7 @@ AxDialogCreds::AxDialogCreds(const QJSValue &headers, QVector<CredentialData> ve
     searchLineEdit->setPlaceholderText("filter");
 
     hideButton = new ClickableLabel("X");
-    hideButton->setCursor( Qt::PointingHandCursor );
+    hideButton->setCursor(Qt::PointingHandCursor);
 
     searchLayout = new QHBoxLayout(searchWidget);
     searchLayout->setContentsMargins(0, 0, 0, 0);
@@ -961,7 +1078,7 @@ AxDialogCreds::AxDialogCreds(const QJSValue &headers, QVector<CredentialData> ve
 
     mainLayout = new QVBoxLayout();
     mainLayout->addWidget(searchWidget);
-    mainLayout->addWidget(tableWidget);
+    mainLayout->addWidget(tableView);
     mainLayout->addLayout(bottomLayout);
 
     setLayout(mainLayout);
@@ -970,58 +1087,31 @@ AxDialogCreds::AxDialogCreds(const QJSValue &headers, QVector<CredentialData> ve
     connect(chooseButton,   &QPushButton::clicked,    this, &AxDialogCreds::onClicked);
     connect(hideButton,     &ClickableLabel::clicked, this, &AxDialogCreds::clearSearch);
 
-    for (auto cred : vecCreds) {
-        QMap<QString, QString> map;
-        map["id"]       = cred.CredId;
-        map["username"] = cred.Username;
-        map["password"] = cred.Password;
-        map["realm"]    = cred.Realm;
-        map["type"]     = cred.Type;
-        map["tag"]      = cred.Tag;
-        map["date"]     = cred.Date;
-        map["storage"]  = cred.Storage;
-        map["agent_id"] = cred.AgentId;
-        map["host"]     = cred.Host;
-        credList.append(map);
-        allData[cred.CredId] = cred;
-    }
-
-    int columns = 0;
-    tableWidget->setColumnCount(columns);
+    QVector<QString> headerLabels;
+    QVector<QString> fieldKeys;
 
     const int length = headers.property("length").toInt();
     for (int i = 0; i < length; ++i) {
         QString val = headers.property(i).toString();
         if (FIELD_MAP_CREDS.contains(val)) {
-            columns += 1;
-            tableWidget->setColumnCount(columns);
-            tableWidget->setHorizontalHeaderItem(columns - 1, new QTableWidgetItem(FIELD_MAP_CREDS[val]));
-            table_headers.append(val);
+            headerLabels.append(FIELD_MAP_CREDS[val]);
+            fieldKeys.append(val);
         }
     }
-    columns += 1;
-    tableWidget->setColumnCount(columns);
-    tableWidget->setHorizontalHeaderItem(columns - 1, new QTableWidgetItem("CredId"));
-    table_headers.append("id");
-    tableWidget->hideColumn(columns - 1);
+    headerLabels.append("CredId");
+    fieldKeys.append("id");
 
-    if (columns > 2) {
-        for (int i = 0 ; i < columns-2; ++i) {
-            tableWidget->horizontalHeader()->setSectionResizeMode(i, QHeaderView::ResizeToContents);
+    tableModel->setHeaders(headerLabels, fieldKeys);
+    tableModel->setData(vecCreds);
+
+    int lastCol = headerLabels.size() - 1;
+    tableView->hideColumn(lastCol);
+
+    if (headerLabels.size() > 2) {
+        for (int i = 0; i < headerLabels.size() - 2; ++i) {
+            tableView->horizontalHeader()->setSectionResizeMode(i, QHeaderView::ResizeToContents);
         }
     }
-
-    tableWidget->setRowCount(credList.size());
-    for (int col = 0; col < table_headers.size(); ++col) {
-        for (int row = 0; row < credList.size(); row++) {
-            auto header = table_headers[col];
-            auto item = new QTableWidgetItem(credList[row][header]);
-            item->setFlags(item->flags() & ~Qt::ItemIsEditable);
-            tableWidget->setItem(row, col, item);
-        }
-    }
-
-    handleSearch();
 }
 
 QVector<CredentialData> AxDialogCreds::data() { return selectedData; }
@@ -1029,11 +1119,11 @@ QVector<CredentialData> AxDialogCreds::data() { return selectedData; }
 void AxDialogCreds::onClicked()
 {
     selectedData.clear();
-    int columns = tableWidget->columnCount();
-    for( int rowIndex = 0 ; rowIndex < tableWidget->rowCount() ; rowIndex++ ) {
-        if ( tableWidget->item(rowIndex, 0)->isSelected() ) {
-            QString id = tableWidget->item(rowIndex, columns-1)->text();
-            selectedData.append(allData[id]);
+    QModelIndexList selected = tableView->selectionModel()->selectedRows();
+    for (const auto& proxyIndex : selected) {
+        QModelIndex sourceIndex = proxyModel->mapToSource(proxyIndex);
+        if (sourceIndex.isValid()) {
+            selectedData.append(tableModel->getCredential(sourceIndex.row()));
         }
     }
     this->accept();
@@ -1041,18 +1131,7 @@ void AxDialogCreds::onClicked()
 
 void AxDialogCreds::handleSearch()
 {
-    QString filterText = searchLineEdit->text();
-
-    for (int row = 0; row < tableWidget->rowCount(); row++) {
-        bool match = false;
-        for (int col = 0; col < tableWidget->columnCount()-1; ++col) {
-            if (tableWidget->item(row, col) && tableWidget->item(row, col)->text().contains(filterText, Qt::CaseInsensitive)) {
-                match = true;
-                break;
-            }
-        }
-        tableWidget->setRowHidden(row, !match);
-    }
+    proxyModel->setFilterText(searchLineEdit->text());
 }
 
 void AxDialogCreds::clearSearch()
@@ -1061,11 +1140,11 @@ void AxDialogCreds::clearSearch()
     handleSearch();
 }
 
-AxSelectorCreds::AxSelectorCreds(const QJSValue &headers, QTableWidget* tableWidget, QPushButton* button, AxScriptEngine* jsEngine, QWidget* parent) : QObject(parent), scriptEngine(jsEngine)
+AxSelectorCreds::AxSelectorCreds(const QJSValue &headers, AxScriptEngine* jsEngine, QWidget* parent) : QObject(parent), scriptEngine(jsEngine)
 {
     auto vecCreds = scriptEngine->manager()->GetCredentials();
 
-    dialog = new AxDialogCreds(headers, vecCreds, tableWidget, button);
+    dialog = new AxDialogCreds(headers, vecCreds);
     dialog->setWindowTitle("Choose credentials");
 }
 
@@ -1100,22 +1179,30 @@ void AxSelectorCreds::close() const { dialog->close(); }
 
 /// SELECTOR AGENTS
 
-AxDialogAgents::AxDialogAgents(const QJSValue &headers, QVector<AgentData> vecAgents, QTableWidget *tableWidget, QPushButton *button, QWidget *parent) : tableWidget(tableWidget), chooseButton(button)
+AxDialogAgents::AxDialogAgents(const QJSValue &headers, const QVector<AgentData> &vecAgents, QWidget *parent)
 {
-    tableWidget->setAlternatingRowColors( true );
-    tableWidget->setAutoFillBackground( false );
-    tableWidget->setShowGrid( false );
-    tableWidget->setSortingEnabled( true );
-    tableWidget->setWordWrap( true );
-    tableWidget->setCornerButtonEnabled( true );
-    tableWidget->setSelectionBehavior( QAbstractItemView::SelectRows );
-    tableWidget->setFocusPolicy( Qt::NoFocus );
-    tableWidget->horizontalHeader()->setSectionResizeMode( QHeaderView::Stretch );
-    tableWidget->horizontalHeader()->setCascadingSectionResizes( true );
-    tableWidget->horizontalHeader()->setHighlightSections( false );
-    tableWidget->verticalHeader()->setVisible( false );
+    this->setProperty("Main", "base");
 
-    chooseButton->setText("Choose");
+    tableView = new QTableView(this);
+    tableView->setAlternatingRowColors(true);
+    tableView->setShowGrid(false);
+    tableView->setSortingEnabled(true);
+    tableView->setWordWrap(true);
+    tableView->setSelectionBehavior(QAbstractItemView::SelectRows);
+    tableView->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    tableView->setFocusPolicy(Qt::NoFocus);
+    tableView->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    tableView->horizontalHeader()->setCascadingSectionResizes(true);
+    tableView->horizontalHeader()->setHighlightSections(false);
+    tableView->verticalHeader()->setVisible(false);
+    tableView->setEditTriggers(QAbstractItemView::NoEditTriggers);
+
+    tableModel = new AxAgentsTableModel(this);
+    proxyModel = new AxAgentsFilterProxyModel(this);
+    proxyModel->setSourceModel(tableModel);
+    tableView->setModel(proxyModel);
+
+    chooseButton = new QPushButton("Choose", this);
 
     spacer_1 = new QSpacerItem(40, 20, QSizePolicy::Expanding, QSizePolicy::Maximum);
     spacer_2 = new QSpacerItem(40, 20, QSizePolicy::Expanding, QSizePolicy::Maximum);
@@ -1131,7 +1218,7 @@ AxDialogAgents::AxDialogAgents(const QJSValue &headers, QVector<AgentData> vecAg
     searchLineEdit->setPlaceholderText("filter");
 
     hideButton = new ClickableLabel("X");
-    hideButton->setCursor( Qt::PointingHandCursor );
+    hideButton->setCursor(Qt::PointingHandCursor);
 
     searchLayout = new QHBoxLayout(searchWidget);
     searchLayout->setContentsMargins(0, 0, 0, 0);
@@ -1141,7 +1228,7 @@ AxDialogAgents::AxDialogAgents(const QJSValue &headers, QVector<AgentData> vecAg
 
     mainLayout = new QVBoxLayout();
     mainLayout->addWidget(searchWidget);
-    mainLayout->addWidget(tableWidget);
+    mainLayout->addWidget(tableView);
     mainLayout->addLayout(bottomLayout);
 
     setLayout(mainLayout);
@@ -1150,75 +1237,31 @@ AxDialogAgents::AxDialogAgents(const QJSValue &headers, QVector<AgentData> vecAg
     connect(chooseButton,   &QPushButton::clicked,    this, &AxDialogAgents::onClicked);
     connect(hideButton,     &ClickableLabel::clicked, this, &AxDialogAgents::clearSearch);
 
-    for (auto agentData : vecAgents) {
-        QString username = agentData.Username;
-        if ( agentData.Elevated )
-            username = "* " + username;
-        if ( !agentData.Impersonated.isEmpty() )
-            username += " [" + agentData.Impersonated + "]";
-
-        QString process  = QString("%1 (%2)").arg(agentData.Process).arg(agentData.Arch);
-
-        QString os = "unknown";
-        if (agentData.Os == OS_WINDOWS)    os = "windows";
-        else if (agentData.Os == OS_LINUX) os = "linux";
-        else if (agentData.Os == OS_MAC)   os = "macos";
-
-        QMap<QString, QString> map;
-        map["id"]          = agentData.Id;
-        map["type"]        = agentData.Name;
-        map["listener"]    = agentData.Listener;
-        map["external_ip"] = agentData.ExternalIP;
-        map["internal_ip"] = agentData.InternalIP;
-        map["domain"]      = agentData.Domain;
-        map["computer"]    = agentData.Computer;
-        map["username"]    = username;
-        map["process"]     = process;
-        map["pid"]         = agentData.Pid;
-        map["tid"]         = agentData.Tid;
-        map["os"]          = os;
-        map["tags"]        = agentData.Tags;
-
-        agentsList.append(map);
-        allData[agentData.Id] = agentData;
-    }
-
-    int columns = 0;
-    tableWidget->setColumnCount(columns);
+    QVector<QString> headerLabels;
+    QVector<QString> fieldKeys;
 
     const int length = headers.property("length").toInt();
     for (int i = 0; i < length; ++i) {
         QString val = headers.property(i).toString();
         if (FIELD_MAP_AGENTS.contains(val)) {
-            columns += 1;
-            tableWidget->setColumnCount(columns);
-            tableWidget->setHorizontalHeaderItem(columns - 1, new QTableWidgetItem(FIELD_MAP_AGENTS[val]));
-            table_headers.append(val);
+            headerLabels.append(FIELD_MAP_AGENTS[val]);
+            fieldKeys.append(val);
         }
     }
-    columns += 1;
-    tableWidget->setColumnCount(columns);
-    tableWidget->setHorizontalHeaderItem(columns - 1, new QTableWidgetItem("Agent ID"));
-    table_headers.append("id");
-    tableWidget->hideColumn(columns - 1);
+    headerLabels.append("Agent ID");
+    fieldKeys.append("id");
 
-    if (columns > 2) {
-        for (int i = 0 ; i < columns-2; ++i) {
-            tableWidget->horizontalHeader()->setSectionResizeMode(i, QHeaderView::ResizeToContents);
+    tableModel->setHeaders(headerLabels, fieldKeys);
+    tableModel->setData(vecAgents);
+
+    int lastCol = headerLabels.size() - 1;
+    tableView->hideColumn(lastCol);
+
+    if (headerLabels.size() > 2) {
+        for (int i = 0; i < headerLabels.size() - 2; ++i) {
+            tableView->horizontalHeader()->setSectionResizeMode(i, QHeaderView::ResizeToContents);
         }
     }
-
-    tableWidget->setRowCount(agentsList.size());
-    for (int col = 0; col < table_headers.size(); ++col) {
-        for (int row = 0; row < agentsList.size(); row++) {
-            auto header = table_headers[col];
-            auto item = new QTableWidgetItem(agentsList[row][header]);
-            item->setFlags(item->flags() & ~Qt::ItemIsEditable);
-            tableWidget->setItem(row, col, item);
-        }
-    }
-
-    handleSearch();
 }
 
 QVector<AgentData> AxDialogAgents::data() { return selectedData; }
@@ -1226,11 +1269,11 @@ QVector<AgentData> AxDialogAgents::data() { return selectedData; }
 void AxDialogAgents::onClicked()
 {
     selectedData.clear();
-    int columns = tableWidget->columnCount();
-    for( int rowIndex = 0 ; rowIndex < tableWidget->rowCount() ; rowIndex++ ) {
-        if ( tableWidget->item(rowIndex, 0)->isSelected() ) {
-            QString id = tableWidget->item(rowIndex, columns-1)->text();
-            selectedData.append(allData[id]);
+    QModelIndexList selected = tableView->selectionModel()->selectedRows();
+    for (const auto& proxyIndex : selected) {
+        QModelIndex sourceIndex = proxyModel->mapToSource(proxyIndex);
+        if (sourceIndex.isValid()) {
+            selectedData.append(tableModel->getAgent(sourceIndex.row()));
         }
     }
     this->accept();
@@ -1238,18 +1281,7 @@ void AxDialogAgents::onClicked()
 
 void AxDialogAgents::handleSearch()
 {
-    QString filterText = searchLineEdit->text();
-
-    for (int row = 0; row < tableWidget->rowCount(); row++) {
-        bool match = false;
-        for (int col = 0; col < tableWidget->columnCount()-1; ++col) {
-            if (tableWidget->item(row, col) && tableWidget->item(row, col)->text().contains(filterText, Qt::CaseInsensitive)) {
-                match = true;
-                break;
-            }
-        }
-        tableWidget->setRowHidden(row, !match);
-    }
+    proxyModel->setFilterText(searchLineEdit->text());
 }
 
 void AxDialogAgents::clearSearch()
@@ -1258,7 +1290,7 @@ void AxDialogAgents::clearSearch()
     handleSearch();
 }
 
-AxSelectorAgents::AxSelectorAgents(const QJSValue &headers, QTableWidget* tableWidget, QPushButton* button, AxScriptEngine* jsEngine, QWidget* parent) : QObject(parent), scriptEngine(jsEngine)
+AxSelectorAgents::AxSelectorAgents(const QJSValue &headers, AxScriptEngine* jsEngine, QWidget* parent) : QObject(parent), scriptEngine(jsEngine)
 {
     QVector<AgentData> vecAgents;
 
@@ -1266,7 +1298,7 @@ AxSelectorAgents::AxSelectorAgents(const QJSValue &headers, QTableWidget* tableW
     for (auto agent : agents)
         vecAgents.append(agent->data);
 
-    dialog = new AxDialogAgents(headers, vecAgents, tableWidget, button);
+    dialog = new AxDialogAgents(headers, vecAgents);
     dialog->setWindowTitle("Choose agent");
 }
 
@@ -1314,3 +1346,581 @@ QJSValue AxSelectorAgents::exec() const
 }
 
 void AxSelectorAgents::close() const { dialog->close(); }
+
+
+
+/// SELECTOR LISTENERS
+
+AxDialogListeners::AxDialogListeners(const QJSValue &headers, const QVector<ListenerData> &vecListeners, QWidget *parent)
+{
+    this->setProperty("Main", "base");
+
+    tableView = new QTableView(this);
+    tableView->setAlternatingRowColors(true);
+    tableView->setShowGrid(false);
+    tableView->setSortingEnabled(true);
+    tableView->setWordWrap(true);
+    tableView->setSelectionBehavior(QAbstractItemView::SelectRows);
+    tableView->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    tableView->setFocusPolicy(Qt::NoFocus);
+    tableView->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    tableView->horizontalHeader()->setCascadingSectionResizes(true);
+    tableView->horizontalHeader()->setHighlightSections(false);
+    tableView->verticalHeader()->setVisible(false);
+    tableView->setEditTriggers(QAbstractItemView::NoEditTriggers);
+
+    tableModel = new AxListenersTableModel(this);
+    proxyModel = new AxListenersFilterProxyModel(this);
+    proxyModel->setSourceModel(tableModel);
+    tableView->setModel(proxyModel);
+
+    chooseButton = new QPushButton("Choose", this);
+
+    spacer_1 = new QSpacerItem(40, 20, QSizePolicy::Expanding, QSizePolicy::Maximum);
+    spacer_2 = new QSpacerItem(40, 20, QSizePolicy::Expanding, QSizePolicy::Maximum);
+
+    bottomLayout = new QHBoxLayout();
+    bottomLayout->addItem(spacer_1);
+    bottomLayout->addWidget(chooseButton);
+    bottomLayout->addItem(spacer_2);
+
+    searchWidget = new QWidget(this);
+
+    searchLineEdit = new QLineEdit(searchWidget);
+    searchLineEdit->setPlaceholderText("filter");
+
+    hideButton = new ClickableLabel("X");
+    hideButton->setCursor(Qt::PointingHandCursor);
+
+    searchLayout = new QHBoxLayout(searchWidget);
+    searchLayout->setContentsMargins(0, 0, 0, 0);
+    searchLayout->setSpacing(4);
+    searchLayout->addWidget(searchLineEdit);
+    searchLayout->addWidget(hideButton);
+
+    mainLayout = new QVBoxLayout();
+    mainLayout->addWidget(searchWidget);
+    mainLayout->addWidget(tableView);
+    mainLayout->addLayout(bottomLayout);
+
+    setLayout(mainLayout);
+
+    connect(searchLineEdit, &QLineEdit::textEdited,   this, &AxDialogListeners::handleSearch);
+    connect(chooseButton,   &QPushButton::clicked,    this, &AxDialogListeners::onClicked);
+    connect(hideButton,     &ClickableLabel::clicked, this, &AxDialogListeners::clearSearch);
+
+    QVector<QString> headerLabels;
+    QVector<QString> fieldKeys;
+
+    const int length = headers.property("length").toInt();
+    for (int i = 0; i < length; ++i) {
+        QString val = headers.property(i).toString();
+        if (FIELD_MAP_LISTENERS.contains(val)) {
+            headerLabels.append(FIELD_MAP_LISTENERS[val]);
+            fieldKeys.append(val);
+        }
+    }
+    headerLabels.append("Name");
+    fieldKeys.append("name");
+
+    tableModel->setHeaders(headerLabels, fieldKeys);
+    tableModel->setData(vecListeners);
+
+    int lastCol = headerLabels.size() - 1;
+    tableView->hideColumn(lastCol);
+
+    if (headerLabels.size() > 2) {
+        for (int i = 0; i < headerLabels.size() - 2; ++i) {
+            tableView->horizontalHeader()->setSectionResizeMode(i, QHeaderView::ResizeToContents);
+        }
+    }
+}
+
+QVector<ListenerData> AxDialogListeners::data() { return selectedData; }
+
+void AxDialogListeners::onClicked()
+{
+    selectedData.clear();
+    QModelIndexList selected = tableView->selectionModel()->selectedRows();
+    for (const auto& proxyIndex : selected) {
+        QModelIndex sourceIndex = proxyModel->mapToSource(proxyIndex);
+        if (sourceIndex.isValid()) {
+            selectedData.append(tableModel->getListener(sourceIndex.row()));
+        }
+    }
+    this->accept();
+}
+
+void AxDialogListeners::handleSearch()
+{
+    proxyModel->setFilterText(searchLineEdit->text());
+}
+
+void AxDialogListeners::clearSearch()
+{
+    searchLineEdit->clear();
+    handleSearch();
+}
+
+AxSelectorListeners::AxSelectorListeners(const QJSValue &headers, AxScriptEngine* jsEngine, QWidget* parent) : QObject(parent), scriptEngine(jsEngine)
+{
+    auto vecListeners = scriptEngine->manager()->GetListeners();
+
+    dialog = new AxDialogListeners(headers, vecListeners);
+    dialog->setWindowTitle("Choose listener");
+}
+
+void AxSelectorListeners::setSize(const int w, const int h ) const { dialog->resize(w, h); }
+
+QJSValue AxSelectorListeners::exec() const
+{
+    QVector<ListenerData> vecListeners;
+    if (dialog->exec() == QDialog::Accepted) {
+        vecListeners = dialog->data();
+    }
+
+    QVariantList list;
+    for (auto listener : vecListeners) {
+        QVariantMap map;
+        map["name"]       = listener.Name;
+        map["type"]       = listener.ListenerType;
+        map["protocol"]   = listener.ListenerProtocol;
+        map["bind_host"]  = listener.BindHost;
+        map["bind_port"]  = listener.BindPort;
+        map["agent_addr"] = listener.AgentAddresses;
+        map["status"]     = listener.Status;
+        map["date"]       = listener.Date;
+        list.append(map);
+    }
+    return this->scriptEngine->engine()->toScriptValue(list);
+}
+
+void AxSelectorListeners::close() const { dialog->close(); }
+
+
+
+/// SELECTOR TARGETS
+
+AxDialogTargets::AxDialogTargets(const QJSValue &headers, const QVector<TargetData> &vecTargets, QWidget *parent)
+{
+    this->setProperty("Main", "base");
+
+    tableView = new QTableView(this);
+    tableView->setAlternatingRowColors(true);
+    tableView->setShowGrid(false);
+    tableView->setSortingEnabled(true);
+    tableView->setWordWrap(true);
+    tableView->setSelectionBehavior(QAbstractItemView::SelectRows);
+    tableView->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    tableView->setFocusPolicy(Qt::NoFocus);
+    tableView->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    tableView->horizontalHeader()->setCascadingSectionResizes(true);
+    tableView->horizontalHeader()->setHighlightSections(false);
+    tableView->verticalHeader()->setVisible(false);
+    tableView->setEditTriggers(QAbstractItemView::NoEditTriggers);
+
+    tableModel = new AxTargetsTableModel(this);
+    proxyModel = new AxTargetsFilterProxyModel(this);
+    proxyModel->setSourceModel(tableModel);
+    tableView->setModel(proxyModel);
+
+    chooseButton = new QPushButton("Choose", this);
+
+    spacer_1 = new QSpacerItem(40, 20, QSizePolicy::Expanding, QSizePolicy::Maximum);
+    spacer_2 = new QSpacerItem(40, 20, QSizePolicy::Expanding, QSizePolicy::Maximum);
+
+    bottomLayout = new QHBoxLayout();
+    bottomLayout->addItem(spacer_1);
+    bottomLayout->addWidget(chooseButton);
+    bottomLayout->addItem(spacer_2);
+
+    searchWidget = new QWidget(this);
+
+    searchLineEdit = new QLineEdit(searchWidget);
+    searchLineEdit->setPlaceholderText("filter");
+
+    hideButton = new ClickableLabel("X");
+    hideButton->setCursor(Qt::PointingHandCursor);
+
+    searchLayout = new QHBoxLayout(searchWidget);
+    searchLayout->setContentsMargins(0, 0, 0, 0);
+    searchLayout->setSpacing(4);
+    searchLayout->addWidget(searchLineEdit);
+    searchLayout->addWidget(hideButton);
+
+    mainLayout = new QVBoxLayout();
+    mainLayout->addWidget(searchWidget);
+    mainLayout->addWidget(tableView);
+    mainLayout->addLayout(bottomLayout);
+
+    setLayout(mainLayout);
+
+    connect(searchLineEdit, &QLineEdit::textEdited,   this, &AxDialogTargets::handleSearch);
+    connect(chooseButton,   &QPushButton::clicked,    this, &AxDialogTargets::onClicked);
+    connect(hideButton,     &ClickableLabel::clicked, this, &AxDialogTargets::clearSearch);
+
+    QVector<QString> headerLabels;
+    QVector<QString> fieldKeys;
+
+    const int length = headers.property("length").toInt();
+    for (int i = 0; i < length; ++i) {
+        QString val = headers.property(i).toString();
+        if (FIELD_MAP_TARGETS.contains(val)) {
+            headerLabels.append(FIELD_MAP_TARGETS[val]);
+            fieldKeys.append(val);
+        }
+    }
+    headerLabels.append("Target ID");
+    fieldKeys.append("id");
+
+    tableModel->setHeaders(headerLabels, fieldKeys);
+    tableModel->setData(vecTargets);
+
+    int lastCol = headerLabels.size() - 1;
+    tableView->hideColumn(lastCol);
+
+    if (headerLabels.size() > 2) {
+        for (int i = 0; i < headerLabels.size() - 2; ++i) {
+            tableView->horizontalHeader()->setSectionResizeMode(i, QHeaderView::ResizeToContents);
+        }
+    }
+}
+
+QVector<TargetData> AxDialogTargets::data() { return selectedData; }
+
+void AxDialogTargets::onClicked()
+{
+    selectedData.clear();
+    QModelIndexList selected = tableView->selectionModel()->selectedRows();
+    for (const auto& proxyIndex : selected) {
+        QModelIndex sourceIndex = proxyModel->mapToSource(proxyIndex);
+        if (sourceIndex.isValid()) {
+            selectedData.append(tableModel->getTarget(sourceIndex.row()));
+        }
+    }
+    this->accept();
+}
+
+void AxDialogTargets::handleSearch()
+{
+    proxyModel->setFilterText(searchLineEdit->text());
+}
+
+void AxDialogTargets::clearSearch()
+{
+    searchLineEdit->clear();
+    handleSearch();
+}
+
+AxSelectorTargets::AxSelectorTargets(const QJSValue &headers, AxScriptEngine* jsEngine, QWidget* parent) : QObject(parent), scriptEngine(jsEngine)
+{
+    auto vecTargets = scriptEngine->manager()->GetTargets();
+
+    dialog = new AxDialogTargets(headers, vecTargets);
+    dialog->setWindowTitle("Choose target");
+}
+
+void AxSelectorTargets::setSize(const int w, const int h ) const { dialog->resize(w, h); }
+
+QJSValue AxSelectorTargets::exec() const
+{
+    QVector<TargetData> vecTargets;
+    if (dialog->exec() == QDialog::Accepted) {
+        vecTargets = dialog->data();
+    }
+
+    QVariantList list;
+    for (auto target : vecTargets) {
+        QString os = "unknown";
+        if (target.Os == OS_WINDOWS)    os = "windows";
+        else if (target.Os == OS_LINUX) os = "linux";
+        else if (target.Os == OS_MAC)   os = "macos";
+
+        QVariantMap map;
+        map["id"]       = target.TargetId;
+        map["computer"] = target.Computer;
+        map["domain"]   = target.Domain;
+        map["address"]  = target.Address;
+        map["tag"]      = target.Tag;
+        map["os"]       = os;
+        map["os_desc"]  = target.OsDesc;
+        map["info"]     = target.Info;
+        map["date"]     = target.Date;
+        map["alive"]    = target.Alive;
+        list.append(map);
+    }
+    return this->scriptEngine->engine()->toScriptValue(list);
+}
+
+void AxSelectorTargets::close() const { dialog->close(); }
+
+
+
+/// SELECTOR DOWNLOADS
+
+AxDialogDownloads::AxDialogDownloads(const QJSValue &headers, const QVector<DownloadData> &vecDownloads, QWidget *parent)
+{
+    this->setProperty("Main", "base");
+
+    tableView = new QTableView(this);
+    tableView->setAlternatingRowColors(true);
+    tableView->setShowGrid(false);
+    tableView->setSortingEnabled(true);
+    tableView->setWordWrap(true);
+    tableView->setSelectionBehavior(QAbstractItemView::SelectRows);
+    tableView->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    tableView->setFocusPolicy(Qt::NoFocus);
+    tableView->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    tableView->horizontalHeader()->setCascadingSectionResizes(true);
+    tableView->horizontalHeader()->setHighlightSections(false);
+    tableView->verticalHeader()->setVisible(false);
+    tableView->setEditTriggers(QAbstractItemView::NoEditTriggers);
+
+    tableModel = new AxDownloadsTableModel(this);
+    proxyModel = new AxDownloadsFilterProxyModel(this);
+    proxyModel->setSourceModel(tableModel);
+    tableView->setModel(proxyModel);
+
+    chooseButton = new QPushButton("Choose", this);
+
+    spacer_1 = new QSpacerItem(40, 20, QSizePolicy::Expanding, QSizePolicy::Maximum);
+    spacer_2 = new QSpacerItem(40, 20, QSizePolicy::Expanding, QSizePolicy::Maximum);
+
+    bottomLayout = new QHBoxLayout();
+    bottomLayout->addItem(spacer_1);
+    bottomLayout->addWidget(chooseButton);
+    bottomLayout->addItem(spacer_2);
+
+    searchWidget = new QWidget(this);
+
+    searchLineEdit = new QLineEdit(searchWidget);
+    searchLineEdit->setPlaceholderText("filter");
+
+    hideButton = new ClickableLabel("X");
+    hideButton->setCursor(Qt::PointingHandCursor);
+
+    searchLayout = new QHBoxLayout(searchWidget);
+    searchLayout->setContentsMargins(0, 0, 0, 0);
+    searchLayout->setSpacing(4);
+    searchLayout->addWidget(searchLineEdit);
+    searchLayout->addWidget(hideButton);
+
+    mainLayout = new QVBoxLayout();
+    mainLayout->addWidget(searchWidget);
+    mainLayout->addWidget(tableView);
+    mainLayout->addLayout(bottomLayout);
+
+    setLayout(mainLayout);
+
+    connect(searchLineEdit, &QLineEdit::textEdited,   this, &AxDialogDownloads::handleSearch);
+    connect(chooseButton,   &QPushButton::clicked,    this, &AxDialogDownloads::onClicked);
+    connect(hideButton,     &ClickableLabel::clicked, this, &AxDialogDownloads::clearSearch);
+
+    QVector<QString> headerLabels;
+    QVector<QString> fieldKeys;
+
+    const int length = headers.property("length").toInt();
+    for (int i = 0; i < length; ++i) {
+        QString val = headers.property(i).toString();
+        if (FIELD_MAP_DOWNLOADS.contains(val)) {
+            headerLabels.append(FIELD_MAP_DOWNLOADS[val]);
+            fieldKeys.append(val);
+        }
+    }
+    headerLabels.append("File ID");
+    fieldKeys.append("id");
+
+    tableModel->setHeaders(headerLabels, fieldKeys);
+    tableModel->setData(vecDownloads);
+
+    int lastCol = headerLabels.size() - 1;
+    tableView->hideColumn(lastCol);
+
+    if (headerLabels.size() > 2) {
+        for (int i = 0; i < headerLabels.size() - 2; ++i) {
+            tableView->horizontalHeader()->setSectionResizeMode(i, QHeaderView::ResizeToContents);
+        }
+    }
+}
+
+QVector<DownloadData> AxDialogDownloads::data() { return selectedData; }
+
+void AxDialogDownloads::onClicked()
+{
+    selectedData.clear();
+    QModelIndexList selected = tableView->selectionModel()->selectedRows();
+    for (const auto& proxyIndex : selected) {
+        QModelIndex sourceIndex = proxyModel->mapToSource(proxyIndex);
+        if (sourceIndex.isValid()) {
+            selectedData.append(tableModel->getDownload(sourceIndex.row()));
+        }
+    }
+    this->accept();
+}
+
+void AxDialogDownloads::handleSearch()
+{
+    proxyModel->setFilterText(searchLineEdit->text());
+}
+
+void AxDialogDownloads::clearSearch()
+{
+    searchLineEdit->clear();
+    handleSearch();
+}
+
+AxSelectorDownloads::AxSelectorDownloads(const QJSValue &headers, AxScriptEngine* jsEngine, QWidget* parent) : QObject(parent), scriptEngine(jsEngine)
+{
+    auto mapDownloads = scriptEngine->manager()->GetDownloads();
+    QVector<DownloadData> vecDownloads;
+    for (const auto& download : mapDownloads)
+        vecDownloads.append(download);
+
+    dialog = new AxDialogDownloads(headers, vecDownloads);
+    dialog->setWindowTitle("Choose download");
+}
+
+void AxSelectorDownloads::setSize(const int w, const int h ) const { dialog->resize(w, h); }
+
+QJSValue AxSelectorDownloads::exec() const
+{
+    QVector<DownloadData> vecDownloads;
+    if (dialog->exec() == QDialog::Accepted) {
+        vecDownloads = dialog->data();
+    }
+
+    QVariantList list;
+    for (auto download : vecDownloads) {
+        QString state;
+        switch (download.State) {
+            case DOWNLOAD_STATE_RUNNING:  state = "running";  break;
+            case DOWNLOAD_STATE_STOPPED:  state = "stopped";  break;
+            case DOWNLOAD_STATE_FINISHED: state = "finished"; break;
+            default:                      state = "canceled"; break;
+        }
+
+        QVariantMap map;
+        map["id"]         = download.FileId;
+        map["agent_id"]   = download.AgentId;
+        map["agent_name"] = download.AgentName;
+        map["user"]       = download.User;
+        map["computer"]   = download.Computer;
+        map["filename"]   = download.Filename;
+        map["total_size"] = download.TotalSize;
+        map["recv_size"]  = download.RecvSize;
+        map["state"]      = state;
+        map["date"]       = download.Date;
+        list.append(map);
+    }
+    return this->scriptEngine->engine()->toScriptValue(list);
+}
+
+void AxSelectorDownloads::close() const { dialog->close(); }
+
+
+
+/// DOCK WIDGET
+
+#include <UI/Widgets/AdaptixWidget.h>
+#include <Client/AuthProfile.h>
+#include <MainAdaptix.h>
+#include <UI/MainUI.h>
+
+AxDockWrapper::AxDockWrapper(AdaptixWidget* w, const QString& id, const QString& title, const QString& location): DockTab(title, w->GetProfile()->GetProject())
+{
+    adaptixWidget = w;
+    QString project = w->GetProfile()->GetProject();
+
+    contentWidget = new QWidget();
+    contentWidget->setProperty("Main", "base");
+
+    dockWidget->setWidget(contentWidget);
+
+    dockId = id + "-" + project;
+    dockTitle = title;
+
+    if (adaptixWidget) {
+        adaptixWidget->AddExtDock(dockId, title, [this]() {
+            show();
+        });
+    }
+
+    if (location == "top") {
+        w->PlaceDock(w->get_dockTop() , dockWidget);
+        dockWidget->toggleAction()->trigger();
+    }
+    else if (location == "bottom") {
+        w->PlaceDock(w->get_dockBottom() , dockWidget);
+        dockWidget->toggleAction()->trigger();
+    }
+    else {
+        dockWidget->open();
+    }
+
+    connect(dockWidget, &KDDockWidgets::QtWidgets::DockWidget::isOpenChanged, this, [this](bool open) {
+        if (!open) {
+            Q_EMIT hidden();
+        } else {
+            Q_EMIT shown();
+        }
+    });
+}
+
+AxDockWrapper::~AxDockWrapper()
+{
+    if (adaptixWidget)
+        adaptixWidget->RemoveExtDock(dockId);
+
+    if (dockWidget) {
+        dockWidget->close();
+        dockWidget->deleteLater();
+    }
+}
+
+void AxDockWrapper::setLayout(QObject* layoutWrapper)
+{
+    if (auto* lw = dynamic_cast<AbstractAxLayout*>(layoutWrapper)) {
+        if (contentWidget->layout())
+            delete contentWidget->layout();
+        contentWidget->setLayout(lw->layout());
+    }
+}
+
+void AxDockWrapper::setSize(const int w, const int h) const
+{
+    if (contentWidget)
+        contentWidget->resize(w, h);
+}
+
+void AxDockWrapper::show()
+{
+    if (!dockWidget)
+        return;
+
+    if ( !dockWidget->isOpen() )
+        dockWidget->toggleAction()->trigger();
+}
+
+void AxDockWrapper::hide()
+{
+    if (dockWidget)
+        dockWidget->close();
+}
+
+void AxDockWrapper::close()
+{
+    hide();
+    Q_EMIT closed();
+}
+
+bool AxDockWrapper::isVisible() const
+{
+    return dockWidget && dockWidget->isOpen();
+}
+
+void AxDockWrapper::setTitle(const QString& title)
+{
+    dockTitle = title;
+    if (dockWidget)
+        dockWidget->setTitle(title);
+}

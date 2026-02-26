@@ -10,7 +10,7 @@ import (
 )
 
 func (dbms *DBMS) DbPivotExist(pivotId string) bool {
-	rows, err := dbms.database.Query("SELECT PivotId FROM Pivots;")
+	rows, err := dbms.database.Query("SELECT PivotId FROM Pivots WHERE PivotId = ?;", pivotId)
 	if err != nil {
 		return false
 	}
@@ -18,25 +18,18 @@ func (dbms *DBMS) DbPivotExist(pivotId string) bool {
 		_ = rows.Close()
 	}(rows)
 
-	for rows.Next() {
-		rowPivotId := ""
-		_ = rows.Scan(&rowPivotId)
-		if pivotId == rowPivotId {
-			return true
-		}
-	}
-	return false
+	return rows.Next()
 }
 
 func (dbms *DBMS) DbPivotInsert(pivotData adaptix.PivotData) error {
 	ok := dbms.DatabaseExists()
 	if !ok {
-		return errors.New("database not exists")
+		return errors.New("database does not exist")
 	}
 
 	ok = dbms.DbPivotExist(pivotData.PivotId)
 	if ok {
-		return fmt.Errorf("pivot %s alredy exists", pivotData.PivotId)
+		return fmt.Errorf("pivot %s already exists", pivotData.PivotId)
 	}
 
 	insertQuery := `INSERT INTO Pivots (PivotId, PivotName, ParentAgentId, ChildAgentId) values(?,?,?,?);`
@@ -48,12 +41,12 @@ func (dbms *DBMS) DbPivotInsert(pivotData adaptix.PivotData) error {
 func (dbms *DBMS) DbPivotDelete(pivotId string) error {
 	ok := dbms.DatabaseExists()
 	if !ok {
-		return errors.New("database not exists")
+		return errors.New("database does not exist")
 	}
 
 	ok = dbms.DbPivotExist(pivotId)
 	if !ok {
-		return fmt.Errorf("pivot %s not exists", pivotId)
+		return fmt.Errorf("pivot %s does not exist", pivotId)
 	}
 
 	deleteQuery := `DELETE FROM Pivots WHERE PivotId = ?;`
@@ -69,21 +62,22 @@ func (dbms *DBMS) DbPivotAll() []*adaptix.PivotData {
 	if ok {
 		selectQuery := `SELECT PivotId, PivotName, ParentAgentId, ChildAgentId FROM Pivots;`
 		query, err := dbms.database.Query(selectQuery)
-		if err == nil {
-			for query.Next() {
-				pivotData := &adaptix.PivotData{}
-				err = query.Scan(&pivotData.PivotId, &pivotData.PivotName, &pivotData.ParentAgentId, &pivotData.ChildAgentId)
-				if err != nil {
-					continue
-				}
-				pivots = append(pivots, pivotData)
-			}
-		} else {
-			logs.Debug("", err.Error()+" --- Clear database file!")
+		if err != nil {
+			logs.Debug("", "Failed to query pivots: "+err.Error())
+			return pivots
 		}
 		defer func(query *sql.Rows) {
 			_ = query.Close()
 		}(query)
+
+		for query.Next() {
+			pivotData := &adaptix.PivotData{}
+			err = query.Scan(&pivotData.PivotId, &pivotData.PivotName, &pivotData.ParentAgentId, &pivotData.ChildAgentId)
+			if err != nil {
+				continue
+			}
+			pivots = append(pivots, pivotData)
+		}
 	}
 	return pivots
 }

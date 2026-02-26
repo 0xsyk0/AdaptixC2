@@ -1,28 +1,87 @@
 #include <UI/Widgets/TargetsWidget.h>
 #include <UI/Widgets/AdaptixWidget.h>
+#include <UI/Widgets/DockWidgetRegister.h>
 #include <UI/Dialogs/DialogTarget.h>
 #include <Client/Requestor.h>
 #include <Client/AuthProfile.h>
 #include <Client/AxScript/AxScriptManager.h>
 #include <Utils/CustomElements.h>
+#include <Utils/NonBlockingDialogs.h>
 
+REGISTER_DOCK_WIDGET(TargetsWidget, "Targets", true)
 
-TargetsWidget::TargetsWidget(AdaptixWidget* w) : adaptixWidget(w)
+TargetsWidget::TargetsWidget(AdaptixWidget* w) : DockTab("Targets", w->GetProfile()->GetProject(), ":/icons/devices"), adaptixWidget(w)
 {
     this->createUI();
 
-     connect(tableWidget,  &QTableWidget::customContextMenuRequested, this, &TargetsWidget::handleTargetsMenu);
-     connect(tableWidget,  &QTableWidget::cellDoubleClicked,          this, &TargetsWidget::onEditTarget);
-     connect(tableWidget,  &QTableWidget::itemSelectionChanged,       this, [this](){tableWidget->setFocus();} );
-     connect(hideButton,   &ClickableLabel::clicked,                  this, &TargetsWidget::toggleSearchPanel);
-     connect(inputFilter,  &QLineEdit::textChanged,                   this, &TargetsWidget::onFilterUpdate);
+    connect(tableView,  &QTableWidget::customContextMenuRequested, this, &TargetsWidget::handleTargetsMenu);
+    connect(tableView,  &QTableWidget::doubleClicked,              this, &TargetsWidget::onEditTarget);
+    connect(tableView->selectionModel(), &QItemSelectionModel::selectionChanged, this, [this](const QItemSelection &selected, const QItemSelection &deselected){
+        Q_UNUSED(selected)
+        Q_UNUSED(deselected)
+        tableView->setFocus();
+    });
+    connect(hideButton,   &ClickableLabel::clicked,  this, &TargetsWidget::toggleSearchPanel);
+    connect(inputFilter,  &QLineEdit::textChanged,   this, &TargetsWidget::onFilterUpdate);
+    connect(inputFilter,  &QLineEdit::returnPressed, this, [this]() { proxyModel->setTextFilter(inputFilter->text()); });
 
-     shortcutSearch = new QShortcut(QKeySequence("Ctrl+F"), tableWidget);
-     shortcutSearch->setContext(Qt::WidgetShortcut);
-     connect(shortcutSearch, &QShortcut::activated, this, &TargetsWidget::toggleSearchPanel);
+    shortcutSearch = new QShortcut(QKeySequence("Ctrl+F"), this);
+    shortcutSearch->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(shortcutSearch, &QShortcut::activated, this, &TargetsWidget::toggleSearchPanel);
+
+    auto shortcutEsc = new QShortcut(QKeySequence(Qt::Key_Escape), inputFilter);
+    shortcutEsc->setContext(Qt::WidgetShortcut);
+    connect(shortcutEsc, &QShortcut::activated, this, [this]() { searchWidget->setVisible(false); });
+
+    this->dockWidget->setWidget(this);
 }
 
 TargetsWidget::~TargetsWidget() = default;
+
+void TargetsWidget::SetUpdatesEnabled(const bool enabled)
+{
+    if (!enabled) {
+        bufferingEnabled = true;
+    } else {
+        bufferingEnabled = false;
+        flushPendingTargets();
+    }
+
+    if (proxyModel)
+        proxyModel->setDynamicSortFilter(enabled);
+    if (tableView)
+        tableView->setSortingEnabled(enabled);
+
+    tableView->setUpdatesEnabled(enabled);
+}
+
+void TargetsWidget::flushPendingTargets()
+{
+    if (pendingTargets.isEmpty())
+        return;
+
+    QList<TargetData> filtered;
+    {
+        QWriteLocker locker(&adaptixWidget->TargetsLock);
+        QSet<QString> existingIds;
+        for (const auto& t : adaptixWidget->Targets)
+            existingIds.insert(t.TargetId);
+
+        for (const auto& target : pendingTargets) {
+            if (existingIds.contains(target.TargetId))
+                continue;
+
+            existingIds.insert(target.TargetId);
+            adaptixWidget->Targets.push_back(target);
+            filtered.append(target);
+        }
+    }
+
+    if (!filtered.isEmpty())
+        targetsModel->add(filtered);
+
+    pendingTargets.clear();
+}
 
 void TargetsWidget::createUI()
 {
@@ -32,311 +91,182 @@ void TargetsWidget::createUI()
     searchWidget->setVisible(false);
 
     inputFilter = new QLineEdit(searchWidget);
-    inputFilter->setPlaceholderText("filter");
+    inputFilter->setPlaceholderText("filter: (win | linux) & ^(test)");
     inputFilter->setMaximumWidth(300);
 
-    hideButton = new ClickableLabel("X");
-    hideButton->setCursor( Qt::PointingHandCursor );
+    autoSearchCheck = new QCheckBox("auto", searchWidget);
+    autoSearchCheck->setChecked(true);
+    autoSearchCheck->setToolTip("Auto search on text change. If unchecked, press Enter to search.");
+
+    hideButton = new ClickableLabel("  x  ");
+    hideButton->setCursor(Qt::PointingHandCursor);
+    hideButton->setStyleSheet("QLabel { color: #888; font-weight: bold; } QLabel:hover { color: #e34234; }");
 
     searchLayout = new QHBoxLayout(searchWidget);
     searchLayout->setContentsMargins(0, 5, 0, 0);
     searchLayout->setSpacing(4);
     searchLayout->addWidget(inputFilter);
+    searchLayout->addWidget(autoSearchCheck);
+    searchLayout->addSpacing(8);
     searchLayout->addWidget(hideButton);
     searchLayout->addSpacerItem(horizontalSpacer2);
 
-    tableWidget = new QTableWidget( this );
-    tableWidget->setColumnCount( 8 );
-    tableWidget->setContextMenuPolicy( Qt::CustomContextMenu );
-    tableWidget->setAutoFillBackground( false );
-    tableWidget->setShowGrid( false );
-    tableWidget->setSortingEnabled( true );
-    tableWidget->setWordWrap( true );
-    tableWidget->setCornerButtonEnabled( false );
-    tableWidget->setSelectionBehavior( QAbstractItemView::SelectRows );
-    tableWidget->setFocusPolicy( Qt::NoFocus );
-    tableWidget->setAlternatingRowColors( true );
-    tableWidget->horizontalHeader()->setSectionResizeMode( QHeaderView::Stretch );
-    tableWidget->horizontalHeader()->setCascadingSectionResizes( true );
-    tableWidget->horizontalHeader()->setHighlightSections( false );
-    tableWidget->verticalHeader()->setVisible( false );
+    targetsModel = new TargetsTableModel(this);
+    proxyModel = new TargetsFilterProxyModel(this);
+    proxyModel->setSourceModel(targetsModel);
+    proxyModel->setFilterCaseSensitivity(Qt::CaseInsensitive);
 
-    tableWidget->setHorizontalHeaderItem(ColumnId,       new QTableWidgetItem("Id"));
-    tableWidget->setHorizontalHeaderItem(ColumnComputer, new QTableWidgetItem("Computer"));
-    tableWidget->setHorizontalHeaderItem(ColumnDomain,   new QTableWidgetItem("Domain"));
-    tableWidget->setHorizontalHeaderItem(ColumnAddress,  new QTableWidgetItem("Address"));
-    tableWidget->setHorizontalHeaderItem(ColumnTag,      new QTableWidgetItem("Tag"));
-    tableWidget->setHorizontalHeaderItem(ColumnOs,       new QTableWidgetItem("OS"));
-    tableWidget->setHorizontalHeaderItem(ColumnDate,     new QTableWidgetItem("Date"));
-    tableWidget->setHorizontalHeaderItem(ColumnInfo,     new QTableWidgetItem("Info"));
+    tableView = new QTableView( this );
+    tableView->setModel(proxyModel);
+    tableView->setContextMenuPolicy( Qt::CustomContextMenu );
+    tableView->setAutoFillBackground( false );
+    tableView->setShowGrid( false );
+    tableView->setSortingEnabled( true );
+    tableView->setWordWrap( true );
+    tableView->setCornerButtonEnabled( false );
+    tableView->setSelectionBehavior( QAbstractItemView::SelectRows );
+    tableView->setFocusPolicy( Qt::NoFocus );
+    tableView->setAlternatingRowColors( true );
+    tableView->horizontalHeader()->setSectionResizeMode( QHeaderView::ResizeToContents );
+    tableView->horizontalHeader()->setCascadingSectionResizes( true );
+    tableView->horizontalHeader()->setHighlightSections( false );
+    tableView->verticalHeader()->setVisible( false );
 
-    tableWidget->setItemDelegate(new PaddingDelegate(tableWidget));
+    proxyModel->sort(-1);
 
-    tableWidget->hideColumn(0);
+    tableView->horizontalHeader()->setSectionResizeMode( TRC_Tag,  QHeaderView::Stretch );
+    tableView->horizontalHeader()->setSectionResizeMode( TRC_Os,   QHeaderView::Stretch );
+    tableView->horizontalHeader()->setSectionResizeMode( TRC_Info, QHeaderView::Stretch );
+
+    tableView->setItemDelegate(new PaddingDelegate(tableView));
+
+    tableView->hideColumn(0);
 
     mainGridLayout = new QGridLayout( this );
     mainGridLayout->setContentsMargins( 0, 0,  0, 0);
     mainGridLayout->addWidget( searchWidget, 0, 0, 1, 1);
-    mainGridLayout->addWidget( tableWidget,  1, 0, 1, 1);
-}
-
-bool TargetsWidget::filterItem(const TargetData &target) const
-{
-    if ( !this->searchWidget->isVisible() )
-        return true;
-
-    QString filter1 = this->inputFilter->text();
-    if( !filter1.isEmpty() ) {
-        if ( target.Computer.contains(filter1, Qt::CaseInsensitive) ||
-            target.Domain.contains(filter1, Qt::CaseInsensitive) ||
-            target.Address.contains(filter1, Qt::CaseInsensitive) ||
-            target.Tag.contains(filter1, Qt::CaseInsensitive) ||
-            target.OsDesc.contains(filter1, Qt::CaseInsensitive) ||
-            target.Info.contains(filter1, Qt::CaseInsensitive)
-        )
-            return true;
-        else
-            return false;
-    }
-    return true;
-}
-
-void TargetsWidget::addTableItem(const TargetData &target) const
-{
-    auto item_TargetId = new QTableWidgetItem( target.TargetId );
-    auto item_Computer = new QTableWidgetItem( target.Computer );
-    auto item_Domain   = new QTableWidgetItem( target.Domain );
-    auto item_Address  = new QTableWidgetItem( target.Address );
-    auto item_Tag      = new QTableWidgetItem( target.Tag );
-    auto item_Os       = new QTableWidgetItem( target.OsDesc );
-    auto item_Date     = new QTableWidgetItem( target.Date );
-    auto item_Info     = new QTableWidgetItem( target.Info );
-
-    item_Computer->setFlags( item_Computer->flags() ^ Qt::ItemIsEditable );
-    item_Computer->setTextAlignment( Qt::AlignLeft | Qt::AlignVCenter );
-
-    item_Domain->setFlags( item_Domain->flags() ^ Qt::ItemIsEditable );
-    item_Domain->setTextAlignment( Qt::AlignLeft | Qt::AlignVCenter );
-
-    item_Address->setFlags( item_Address->flags() ^ Qt::ItemIsEditable );
-    item_Address->setTextAlignment( Qt::AlignCenter );
-
-    item_Os->setFlags( item_Os->flags() ^ Qt::ItemIsEditable );
-    item_Os->setTextAlignment( Qt::AlignLeft | Qt::AlignVCenter );
-
-    item_Tag->setFlags( item_Tag->flags() ^ Qt::ItemIsEditable );
-    item_Tag->setTextAlignment( Qt::AlignLeft | Qt::AlignVCenter );
-
-    item_Date->setFlags( item_Date->flags() ^ Qt::ItemIsEditable );
-    item_Date->setTextAlignment( Qt::AlignCenter );
-
-    item_Info->setFlags( item_Info->flags() ^ Qt::ItemIsEditable );
-    item_Info->setTextAlignment( Qt::AlignLeft | Qt::AlignVCenter );
-
-    if (target.Os == OS_WINDOWS) {
-        if (target.Owned) {
-            item_Os->setIcon(QIcon(":/icons/os_win_red"));
-        } else if(target.Alive) {
-            item_Os->setIcon(QIcon(":/icons/os_win_blue"));
-        } else {
-            item_Os->setIcon(QIcon(":/icons/os_win_grey"));
-        }
-    }
-    else if (target.Os == OS_LINUX) {
-        if (target.Owned) {
-            item_Os->setIcon(QIcon(":/icons/os_linux_red"));
-        } else if(target.Alive) {
-            item_Os->setIcon(QIcon(":/icons/os_linux_blue"));
-        } else {
-            item_Os->setIcon(QIcon(":/icons/os_linux_grey"));
-        }
-    }
-    else if (target.Os == OS_MAC) {
-        if (target.Owned) {
-            item_Os->setIcon(QIcon(":/icons/os_mac_red"));
-        } else if(target.Alive) {
-            item_Os->setIcon(QIcon(":/icons/os_mac_blue"));
-        } else {
-            item_Os->setIcon(QIcon(":/icons/os_mac_grey"));
-        }
-    }
-
-    if( tableWidget->rowCount() < 1 )
-        tableWidget->setRowCount( 1 );
-    else
-        tableWidget->setRowCount( tableWidget->rowCount() + 1 );
-
-    bool isSortingEnabled = tableWidget->isSortingEnabled();
-    tableWidget->setSortingEnabled( false );
-    tableWidget->setItem( tableWidget->rowCount() - 1, ColumnId,       item_TargetId );
-    tableWidget->setItem( tableWidget->rowCount() - 1, ColumnComputer, item_Computer );
-    tableWidget->setItem( tableWidget->rowCount() - 1, ColumnDomain,   item_Domain );
-    tableWidget->setItem( tableWidget->rowCount() - 1, ColumnAddress,  item_Address );
-    tableWidget->setItem( tableWidget->rowCount() - 1, ColumnTag,      item_Tag );
-    tableWidget->setItem( tableWidget->rowCount() - 1, ColumnOs,       item_Os );
-    tableWidget->setItem( tableWidget->rowCount() - 1, ColumnDate,     item_Date );
-    tableWidget->setItem( tableWidget->rowCount() - 1, ColumnInfo,     item_Info );
-    tableWidget->setSortingEnabled( isSortingEnabled );
-
-    tableWidget->horizontalHeader()->setSectionResizeMode( ColumnComputer, QHeaderView::ResizeToContents );
-    tableWidget->horizontalHeader()->setSectionResizeMode( ColumnDomain,   QHeaderView::ResizeToContents );
-    tableWidget->horizontalHeader()->setSectionResizeMode( ColumnAddress,  QHeaderView::ResizeToContents );
-    tableWidget->horizontalHeader()->setSectionResizeMode( ColumnOs,       QHeaderView::ResizeToContents );
-    tableWidget->horizontalHeader()->setSectionResizeMode( ColumnDate,     QHeaderView::ResizeToContents );
-
-    tableWidget->verticalHeader()->setSectionResizeMode(tableWidget->rowCount() - 1, QHeaderView::ResizeToContents);
+    mainGridLayout->addWidget( tableView,  1, 0, 1, 1);
 }
 
 /// Main
 
-void TargetsWidget::Clear() const
+void TargetsWidget::AddTargetsItems(QList<TargetData> targetList)
 {
-    adaptixWidget->Targets.clear();
-    this->ClearTableContent();
-    inputFilter->clear();
-}
+    if (targetList.isEmpty())
+        return;
 
-void TargetsWidget::AddTargetsItems(QList<TargetData> targetList) const
-{
-    for (auto target : targetList) {
-        for( auto t : adaptixWidget->Targets ) {
-            if( t.TargetId == target.TargetId )
-                continue;
-        }
-
-        adaptixWidget->Targets.push_back(target);
-
-        if( !this->filterItem(target) )
-            continue;
-
-        this->addTableItem(target);
+    if (bufferingEnabled) {
+        pendingTargets.append(targetList);
+        return;
     }
+
+    QList<TargetData> filtered;
+    {
+        QWriteLocker locker(&adaptixWidget->TargetsLock);
+        QSet<QString> existingIds;
+        for (const auto& t : adaptixWidget->Targets)
+            existingIds.insert(t.TargetId);
+
+        for (const auto& target : targetList) {
+            if (existingIds.contains(target.TargetId))
+                continue;
+
+            existingIds.insert(target.TargetId);
+            adaptixWidget->Targets.push_back(target);
+            filtered.append(target);
+        }
+    }
+
+    if (filtered.isEmpty())
+        return;
+
+    targetsModel->add(filtered);
+
+    if (adaptixWidget->IsSynchronized())
+        this->UpdateColumnsSize();
 }
 
 void TargetsWidget::EditTargetsItem(const TargetData &newTarget) const
 {
-    for ( int i = 0; i < adaptixWidget->Targets.size(); i++ ) {
-        if( adaptixWidget->Targets[i].TargetId == newTarget.TargetId ) {
-            adaptixWidget->Targets[i].Computer = newTarget.Computer;
-            adaptixWidget->Targets[i].Domain   = newTarget.Domain;
-            adaptixWidget->Targets[i].Address  = newTarget.Address;
-            adaptixWidget->Targets[i].Tag      = newTarget.Tag;
-            adaptixWidget->Targets[i].Os       = newTarget.Os;
-            adaptixWidget->Targets[i].OsDesc   = newTarget.OsDesc;
-            adaptixWidget->Targets[i].Date     = newTarget.Date;
-            adaptixWidget->Targets[i].Info     = newTarget.Info;
-            adaptixWidget->Targets[i].Alive    = newTarget.Alive;
-            adaptixWidget->Targets[i].Owned    = newTarget.Owned;
-            break;
-        }
-    }
+    {
+        QWriteLocker locker(&adaptixWidget->TargetsLock);
+        for ( int i = 0; i < adaptixWidget->Targets.size(); i++ ) {
+            if( adaptixWidget->Targets[i].TargetId == newTarget.TargetId ) {
+                TargetData* td = &adaptixWidget->Targets[i];
 
-    for (int row = 0; row < tableWidget->rowCount(); ++row) {
-        QTableWidgetItem *item = tableWidget->item(row, ColumnId);
-        if ( item && item->text() == newTarget.TargetId ) {
-            tableWidget->item(row, ColumnComputer)->setText(newTarget.Computer);
-            tableWidget->item(row, ColumnDomain  )->setText(newTarget.Domain);
-            tableWidget->item(row, ColumnAddress )->setText(newTarget.Address);
-            tableWidget->item(row, ColumnTag     )->setText(newTarget.Tag);
-            tableWidget->item(row, ColumnOs      )->setText(newTarget.OsDesc);
-            tableWidget->item(row, ColumnDate    )->setText(newTarget.Date);
-            tableWidget->item(row, ColumnInfo    )->setText(newTarget.Info);
-
-            if (newTarget.Os == OS_WINDOWS) {
-                if (newTarget.Owned) {
-                    tableWidget->item(row, ColumnOs)->setIcon(QIcon(":/icons/os_win_red"));
-                } else if(newTarget.Alive) {
-                    tableWidget->item(row, ColumnOs)->setIcon(QIcon(":/icons/os_win_blue"));
-                } else {
-                    tableWidget->item(row, ColumnOs)->setIcon(QIcon(":/icons/os_win_grey"));
-                }
-            }
-            else if (newTarget.Os == OS_LINUX) {
-                if (newTarget.Owned) {
-                    tableWidget->item(row, ColumnOs)->setIcon(QIcon(":/icons/os_linux_red"));
-                } else if(newTarget.Alive) {
-                    tableWidget->item(row, ColumnOs)->setIcon(QIcon(":/icons/os_linux_blue"));
-                } else {
-                    tableWidget->item(row, ColumnOs)->setIcon(QIcon(":/icons/os_linux_grey"));
-                }
-            }
-            else if (newTarget.Os == OS_MAC) {
-                if (newTarget.Owned) {
-                    tableWidget->item(row, ColumnOs)->setIcon(QIcon(":/icons/os_mac_red"));
-                } else if(newTarget.Alive) {
-                    tableWidget->item(row, ColumnOs)->setIcon(QIcon(":/icons/os_mac_blue"));
-                } else {
-                    tableWidget->item(row, ColumnOs)->setIcon(QIcon(":/icons/os_mac_grey"));
-                }
+                td->Computer = newTarget.Computer;
+                td->Domain   = newTarget.Domain;
+                td->Address  = newTarget.Address;
+                td->Tag      = newTarget.Tag;
+                td->Os       = newTarget.Os;
+                td->OsIcon   = newTarget.OsIcon;
+                td->OsDesc   = newTarget.OsDesc;
+                td->Date     = newTarget.Date;
+                td->Info     = newTarget.Info;
+                td->Alive    = newTarget.Alive;
+                td->Agents   = newTarget.Agents;
+                break;
             }
         }
     }
-}
 
-void TargetsWidget::SetData() const
-{
-    this->ClearTableContent();
-
-    for (int i = 0; i < adaptixWidget->Targets.size(); i++ ) {
-        if ( this->filterItem(adaptixWidget->Targets[i]) )
-            this->addTableItem(adaptixWidget->Targets[i]);
-    }
+    targetsModel->update(newTarget.TargetId, newTarget);
 }
 
 void TargetsWidget::RemoveTargetsItem(const QStringList &targetsId) const
 {
-    for (auto targetId : targetsId) {
-        for ( int i = 0; i < adaptixWidget->Targets.size(); i++ ) {
-            if( adaptixWidget->Targets[i].TargetId == targetId ) {
-                adaptixWidget->Targets.erase( adaptixWidget->Targets.begin() + i );
-                break;
-            }
-        }
-
-        for (int row = 0; row < tableWidget->rowCount(); ++row) {
-            QTableWidgetItem *item = tableWidget->item(row, ColumnId);
-            if ( item && item->text() == targetId ) {
-                tableWidget->removeRow(row);
-                break;
+    QStringList filtered;
+    {
+        QWriteLocker locker(&adaptixWidget->TargetsLock);
+        for (auto targetId : targetsId) {
+            for ( int i = 0; i < adaptixWidget->Targets.size(); i++ ) {
+                if( adaptixWidget->Targets[i].TargetId == targetId ) {
+                    filtered.append(targetId);
+                    adaptixWidget->Targets.erase( adaptixWidget->Targets.begin() + i );
+                    break;
+                }
             }
         }
     }
+    targetsModel->remove(filtered);
 }
 
 void TargetsWidget::TargetsSetTag(const QStringList &targetIds, const QString &tag) const
 {
-    QSet<QString> set1 = QSet<QString>(targetIds.begin(), targetIds.end());
-    for ( int i = 0; i < adaptixWidget->Targets.size(); i++ ) {
-        if( set1.contains(adaptixWidget->Targets[i].TargetId) ) {
-            adaptixWidget->Targets[i].Tag = tag;
-            set1.remove(adaptixWidget->Targets[i].TargetId);
+    {
+        QWriteLocker locker(&adaptixWidget->TargetsLock);
+        QSet<QString> set1 = QSet<QString>(targetIds.begin(), targetIds.end());
+        for ( int i = 0; i < adaptixWidget->Targets.size(); i++ ) {
+            if( set1.contains(adaptixWidget->Targets[i].TargetId) ) {
+                adaptixWidget->Targets[i].Tag = tag;
+                set1.remove(adaptixWidget->Targets[i].TargetId);
 
-            if (set1.size() == 0)
-                break;
+                if (set1.size() == 0)
+                    break;
+            }
         }
     }
 
-    QSet<QString> set2 = QSet<QString>(targetIds.begin(), targetIds.end());
-    for (int row = 0; row < tableWidget->rowCount(); ++row) {
-        QTableWidgetItem *item = tableWidget->item(row, ColumnId);
-        if( item && set2.contains(item->text()) ) {
-            tableWidget->item(row, ColumnTag)->setText(tag);
-            set2.remove(item->text());
-
-            if (set2.size() == 0)
-                break;
-        }
-    }
+    targetsModel->setTag(targetIds, tag);
 }
 
-void TargetsWidget::ClearTableContent() const
+void TargetsWidget::UpdateColumnsSize() const
 {
-    for (int row = tableWidget->rowCount() - 1; row >= 0; row--) {
-        for (int col = 0; col < tableWidget->columnCount(); ++col)
-            tableWidget->takeItem(row, col);
+    tableView->resizeColumnToContents(TRC_Computer);
+    tableView->resizeColumnToContents(TRC_Domain);
+    tableView->resizeColumnToContents(TRC_Address);
+    tableView->resizeColumnToContents(TRC_Os);
+    tableView->resizeColumnToContents(TRC_Date);
+}
 
-        tableWidget->removeRow(row);
+void TargetsWidget::Clear() const
+{
+    {
+        QWriteLocker locker(&adaptixWidget->TargetsLock);
+        adaptixWidget->Targets.clear();
     }
+    targetsModel->clear();
+    inputFilter->clear();
 }
 
 /// Sender
@@ -361,60 +291,71 @@ void TargetsWidget::TargetsAdd(QList<TargetData> targetList)
     dataJson["targets"] = jsonArray;
     QByteArray jsonData = QJsonDocument(dataJson).toJson();
 
-    QString message = "";
-    bool ok = false;
-    bool result = HttpReqTargetsCreate(jsonData, *(adaptixWidget->GetProfile()), &message, &ok);
-    if( !result ) {
-        MessageError("Server is not responding");
-        return;
-    }
-    if (!ok) MessageError(message);
+    HttpReqTargetsCreateAsync(jsonData, *(adaptixWidget->GetProfile()), [](bool success, const QString &message, const QJsonObject&) {
+        if (!success)
+            MessageError(message);
+    });
 }
 
 /// Slots
 
 void TargetsWidget::toggleSearchPanel() const
 {
-    if (this->searchWidget->isVisible())
+    if (this->searchWidget->isVisible()) {
         this->searchWidget->setVisible(false);
-    else
+        proxyModel->setSearchVisible(false);
+    }
+    else {
         this->searchWidget->setVisible(true);
-
-    this->SetData();
+        proxyModel->setSearchVisible(true);
+    }
 }
 
-void TargetsWidget::onFilterUpdate() const { this->SetData(); }
+void TargetsWidget::onFilterUpdate() const
+{
+    if (autoSearchCheck->isChecked()) {
+        proxyModel->setTextFilter(inputFilter->text());
+    }
+    inputFilter->setFocus();
+    UpdateColumnsSize();
+}
 
 void TargetsWidget::handleTargetsMenu(const QPoint &pos ) const
 {
-    QStringList targets;
-    for( int rowIndex = 0 ; rowIndex < tableWidget->rowCount() ; rowIndex++ ) {
-        if ( tableWidget->item(rowIndex, 0)->isSelected() ) {
-            QString targetId = tableWidget->item( rowIndex, ColumnId )->text();
-            targets.append(targetId);
-        }
-    }
-
     auto ctxMenu = QMenu();
-
-    int topCount = adaptixWidget->ScriptManager->AddMenuTargets(&ctxMenu, "TargetsTop", targets);
-    if (topCount > 0)
-        ctxMenu.addSeparator();
-
     ctxMenu.addAction("Create", this, &TargetsWidget::onCreateTarget );
-    ctxMenu.addAction("Edit",   this, &TargetsWidget::onEditTarget );
-    ctxMenu.addAction("Remove", this, &TargetsWidget::onRemoveTarget );
-    ctxMenu.addSeparator();
 
-    int centerCount = adaptixWidget->ScriptManager->AddMenuTargets(&ctxMenu, "TargetsCenter", targets);
-    if (centerCount > 0)
+    QModelIndex index = tableView->indexAt(pos);
+    if (index.isValid()) {
+
+        QStringList targets;
+        QModelIndexList selectedRows = tableView->selectionModel()->selectedRows();
+        for (const QModelIndex &proxyIndex : selectedRows) {
+            QModelIndex sourceIndex = proxyModel->mapToSource(proxyIndex);
+            if (!sourceIndex.isValid()) continue;
+
+            QString taskId = targetsModel->data(targetsModel->index(sourceIndex.row(), TRC_Id), Qt::DisplayRole).toString();
+            targets.append(taskId);
+        }
+
+        int topCount = adaptixWidget->ScriptManager->AddMenuTargets(&ctxMenu, "TargetsTop", targets);
+        if (topCount > 0)
+            ctxMenu.addSeparator();
+
+        ctxMenu.addAction("Edit",   this, &TargetsWidget::onEditTarget );
+        ctxMenu.addAction("Remove", this, &TargetsWidget::onRemoveTarget );
         ctxMenu.addSeparator();
 
-    ctxMenu.addAction("Set tag", this, &TargetsWidget::onSetTag );
-    ctxMenu.addAction("Export",  this, &TargetsWidget::onExportTarget );
-    int bottomCount = adaptixWidget->ScriptManager->AddMenuTargets(&ctxMenu, "TargetsBottom", targets);
+        int centerCount = adaptixWidget->ScriptManager->AddMenuTargets(&ctxMenu, "TargetsCenter", targets);
+        if (centerCount > 0)
+            ctxMenu.addSeparator();
 
-    QPoint globalPos = tableWidget->mapToGlobal(pos);
+        ctxMenu.addAction("Set tag",           this, &TargetsWidget::onSetTag );
+        ctxMenu.addAction("Export to file",    this, &TargetsWidget::onExportTarget );
+        ctxMenu.addAction("Copy to clipboard", this, &TargetsWidget::onCopyToClipboard );
+        adaptixWidget->ScriptManager->AddMenuTargets(&ctxMenu, "TargetsBottom", targets);
+    }
+    QPoint globalPos = tableView->mapToGlobal(pos);
     ctxMenu.exec(globalPos);
 }
 
@@ -446,10 +387,10 @@ void TargetsWidget::onCreateTarget()
 
 void TargetsWidget::onEditTarget() const
 {
-    if (tableWidget->selectionModel()->selectedRows().empty())
-        return;
+    auto idx = tableView->currentIndex();
+    if (!idx.isValid()) return;
 
-    auto targetId = tableWidget->item( tableWidget->currentRow(), ColumnId )->text();
+    QString targetId = proxyModel->index(idx.row(), TRC_Id).data().toString();
 
     bool found = false;
     TargetData targetData;
@@ -495,69 +436,67 @@ void TargetsWidget::onEditTarget() const
 
     delete dialogTarget;
 
-    QString message = "";
-    bool ok = false;
-    bool result = HttpReqTargetEdit(jsonData, *(adaptixWidget->GetProfile()), &message, &ok);
-    if( !result ) {
-        MessageError("Server is not responding");
-        return;
-    }
-    if (!ok) MessageError(message);
+    HttpReqTargetEditAsync(jsonData, *(adaptixWidget->GetProfile()), [](bool success, const QString& message, const QJsonObject&) {
+        if (!success)
+            MessageError(message.isEmpty() ? "Server is not responding" : message);
+    });
 }
 
 void TargetsWidget::onRemoveTarget() const
 {
     QStringList listId;
-    for( int rowIndex = 0 ; rowIndex < tableWidget->rowCount() ; rowIndex++ ) {
-        if ( tableWidget->item(rowIndex, 0)->isSelected() ) {
-            auto id = tableWidget->item( rowIndex, ColumnId )->text();
-            listId.append(id);
-        }
+    QModelIndexList selectedRows = tableView->selectionModel()->selectedRows();
+    for (const QModelIndex &proxyIndex : selectedRows) {
+        QModelIndex sourceIndex = proxyModel->mapToSource(proxyIndex);
+        if (!sourceIndex.isValid()) continue;
+
+        QString agentId = targetsModel->data(targetsModel->index(sourceIndex.row(), TRC_Id), Qt::DisplayRole).toString();
+        listId.append(agentId);
     }
 
     if(listId.empty())
         return;
 
-    QString message = QString();
-    bool ok = false;
-    HttpReqTargetRemove(listId, *(adaptixWidget->GetProfile()), &message, &ok);
+    HttpReqTargetRemoveAsync(listId, *(adaptixWidget->GetProfile()), [](bool success, const QString& message, const QJsonObject&) {
+        if (!success)
+            MessageError(message.isEmpty() ? "Response timeout" : message);
+    });
 }
 
 void TargetsWidget::onSetTag() const
 {
+    QString tag = "";
     QStringList listId;
-    for( int rowIndex = 0 ; rowIndex < tableWidget->rowCount() ; rowIndex++ ) {
-        if ( tableWidget->item(rowIndex, ColumnId)->isSelected() ) {
-            auto agentId = tableWidget->item( rowIndex, ColumnId )->text();
-            listId.append(agentId);
-        }
+    QModelIndexList selectedRows = tableView->selectionModel()->selectedRows();
+    for (const QModelIndex &proxyIndex : selectedRows) {
+        QModelIndex sourceIndex = proxyModel->mapToSource(proxyIndex);
+        if (!sourceIndex.isValid()) continue;
+
+        QString cTag    = targetsModel->data(targetsModel->index(sourceIndex.row(), TRC_Tag), Qt::DisplayRole).toString();
+        QString agentId = targetsModel->data(targetsModel->index(sourceIndex.row(), TRC_Id), Qt::DisplayRole).toString();
+        listId.append(agentId);
+
+        if (tag.isEmpty())
+            tag = cTag;
     }
 
     if(listId.empty())
         return;
 
-    QString tag = "";
-    if(listId.size() == 1) {
-        tag = tableWidget->item( tableWidget->currentRow(), ColumnTag )->text();
-    }
-
     bool inputOk;
     QString newTag = QInputDialog::getText(nullptr, "Set tags", "New tag", QLineEdit::Normal,tag, &inputOk);
     if ( inputOk ) {
-        QString message = QString();
-        bool ok = false;
-        bool result = HttpReqTargetSetTag(listId, newTag, *(adaptixWidget->GetProfile()), &message, &ok);
-        if( !result ) {
-            MessageError("Response timeout");
-            return;
-        }
+        HttpReqTargetSetTagAsync(listId, newTag, *(adaptixWidget->GetProfile()), [](bool success, const QString& message, const QJsonObject&) {
+            if (!success)
+                MessageError(message.isEmpty() ? "Response timeout" : message);
+        });
     }
 }
 
 void TargetsWidget::onExportTarget() const
 {
-    if (tableWidget->selectionModel()->selectedRows().empty())
-        return;
+    auto idx = tableView->currentIndex();
+    if (!idx.isValid()) return;
 
     QInputDialog dialog;
     dialog.setWindowTitle("Format for saving");
@@ -573,33 +512,81 @@ void TargetsWidget::onExportTarget() const
 
     QString format = dialog.textValue();
 
-    QString fileName = QFileDialog::getSaveFileName( nullptr, "Save Targets", "targets.txt", "Text Files (*.txt);;All Files (*)" );
-    if ( fileName.isEmpty())
+    QString baseDir = QStringLiteral("targets.txt");
+    if (adaptixWidget && adaptixWidget->GetProfile())
+        baseDir = QDir(adaptixWidget->GetProfile()->GetProjectDir()).filePath(QStringLiteral("targets.txt"));
+
+    NonBlockingDialogs::getSaveFileName(const_cast<TargetsWidget*>(this), "Save Targets", baseDir, "Text Files (*.txt);;All Files (*)",
+        [this, format](const QString& fileName) {
+            if (fileName.isEmpty())
+                return;
+
+            QFile file(fileName);
+            if (!file.open(QIODevice::WriteOnly)) {
+                MessageError("Failed to open file for writing");
+                return;
+            }
+
+            QString content = "";
+            QModelIndexList selectedRows = tableView->selectionModel()->selectedRows();
+            for (const QModelIndex &proxyIndex : selectedRows) {
+                QModelIndex sourceIndex = proxyModel->mapToSource(proxyIndex);
+                if (!sourceIndex.isValid()) continue;
+
+                QString computer = targetsModel->data(targetsModel->index(sourceIndex.row(), TRC_Computer), Qt::DisplayRole).toString();
+                QString domain   = targetsModel->data(targetsModel->index(sourceIndex.row(), TRC_Domain), Qt::DisplayRole).toString();
+                QString address  = targetsModel->data(targetsModel->index(sourceIndex.row(), TRC_Address), Qt::DisplayRole).toString();
+
+                QString temp = format;
+                content += temp
+                .replace("%computer%", computer)
+                .replace("%domain%", domain)
+                .replace("%address%", address)
+                + "\n";
+            }
+
+            file.write(content.trimmed().toUtf8());
+            file.close();
+    });
+}
+
+void TargetsWidget::onCopyToClipboard() const
+{
+    auto idx = tableView->currentIndex();
+    if (!idx.isValid()) return;
+
+    QInputDialog dialog;
+    dialog.setWindowTitle("Format for clipboard");
+    dialog.setLabelText("Format:");
+    dialog.setTextValue("%computer%.%domain% - %address%");
+    QLineEdit *lineEdit = dialog.findChild<QLineEdit*>();
+    if (lineEdit)
+        lineEdit->setMinimumWidth(400);
+
+    bool inputOk = (dialog.exec() == QDialog::Accepted);
+    if (!inputOk)
         return;
 
-    QFile file(fileName);
-    if (!file.open(QIODevice::WriteOnly)) {
-        MessageError("Failed to open file for writing");
-        return;
+    QString format = dialog.textValue();
+
+    QString content = "";
+    QModelIndexList selectedRows = tableView->selectionModel()->selectedRows();
+    for (const QModelIndex &proxyIndex : selectedRows) {
+        QModelIndex sourceIndex = proxyModel->mapToSource(proxyIndex);
+        if (!sourceIndex.isValid()) continue;
+
+        QString computer = targetsModel->data(targetsModel->index(sourceIndex.row(), TRC_Computer), Qt::DisplayRole).toString();
+        QString domain   = targetsModel->data(targetsModel->index(sourceIndex.row(), TRC_Domain), Qt::DisplayRole).toString();
+        QString address  = targetsModel->data(targetsModel->index(sourceIndex.row(), TRC_Address), Qt::DisplayRole).toString();
+
+        QString temp = format;
+        content += temp
+        .replace("%computer%", computer)
+        .replace("%domain%", domain)
+        .replace("%address%", address)
+        + "\n";
     }
 
-     QString content = "";
-     for( int rowIndex = 0 ; rowIndex < tableWidget->rowCount() ; rowIndex++ ) {
-         if ( tableWidget->item(rowIndex, 1)->isSelected() ) {
-
-             QString computer = tableWidget->item(rowIndex, ColumnComputer)->text();
-             QString domain   = tableWidget->item(rowIndex, ColumnDomain)->text();
-             QString address  = tableWidget->item(rowIndex, ColumnAddress)->text();
-
-             QString temp = format;
-             content += temp
-             .replace("%computer%", computer)
-             .replace("%domain%", domain)
-             .replace("%address%", address)
-             + "\n";
-         }
-     }
-
-     file.write(content.trimmed().toUtf8());
-     file.close();
+    QClipboard *clipboard = QApplication::clipboard();
+    clipboard->setText(content.trimmed());
 }

@@ -8,16 +8,21 @@
 
 class AxScriptEngine;
 
+class AxUiFactory;
+
 class BridgeForm : public QObject {
 Q_OBJECT
     AxScriptEngine* scriptEngine;
-    QWidget*        widget;
+    AxUiFactory*    uiFactory;
+    QWidget*        localParentWidget;
+
+    QWidget* getParentWidget() const;
 
 public:
     BridgeForm(AxScriptEngine* scriptEngine, QObject* parent = nullptr);
     ~BridgeForm() override;
 
-public slots:
+public Q_SLOTS:
     void connect(QObject* sender, const QString& signal, const QJSValue& handler);
 
     /// Elements
@@ -53,8 +58,14 @@ public slots:
     QObject* create_selector_file();
     QObject* create_selector_credentials(const QJSValue &headers) const;
     QObject* create_selector_agents(const QJSValue &headers) const;
+    QObject* create_selector_listeners(const QJSValue &headers) const;
+    QObject* create_selector_targets(const QJSValue &headers) const;
+    QObject* create_selector_downloads(const QJSValue &headers) const;
 
-signals:
+    QObject* create_ext_dock(const QString &id, const QString &title, const QString &location = "");
+    QObject* create_ext_dialog(const QString &title);
+
+Q_SIGNALS:
     void scriptError(const QString &msg);
 };
 
@@ -70,7 +81,7 @@ public:
 
     explicit SignalProxy(QJSEngine* engine, QJSValue handler, QObject* parent = nullptr) : QObject(parent), engine(engine), handler(std::move(handler)) {}
 
-public slots:
+public Q_SLOTS:
     void call() const {
         if (handler.isCallable())
             handler.call();

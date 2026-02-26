@@ -1,222 +1,301 @@
 #include <Agent/Agent.h>
 #include <UI/Widgets/DownloadsWidget.h>
 #include <UI/Widgets/AdaptixWidget.h>
+#include <UI/Widgets/DockWidgetRegister.h>
 #include <UI/Dialogs/DialogDownloader.h>
 #include <Client/Requestor.h>
 #include <Client/AuthProfile.h>
 #include <Client/AxScript/AxScriptManager.h>
+#include <Utils/NonBlockingDialogs.h>
+#include <Utils/CustomElements.h>
 
-
-DownloadsWidget::DownloadsWidget(AdaptixWidget* w)
+static QString extractFileName(const QString& filePath)
 {
-    this->adaptixWidget = w;
+    QStringList pathParts = filePath.split("\\", Qt::SkipEmptyParts);
+    QString fileName = pathParts.isEmpty() ? filePath : pathParts.last();
+    pathParts = fileName.split("/", Qt::SkipEmptyParts);
+    return pathParts.isEmpty() ? fileName : pathParts.last();
+}
+
+REGISTER_DOCK_WIDGET(DownloadsWidget, "Downloads", true)
+
+DownloadsWidget::DownloadsWidget(AdaptixWidget* w) : DockTab("Downloads", w->GetProfile()->GetProject(), ":/icons/downloads"), adaptixWidget(w)
+{
     this->createUI();
 
-    connect( tableWidget, &QTableWidget::customContextMenuRequested, this, &DownloadsWidget::handleDownloadsMenu );
+    connect(tableView,  &QTableView::customContextMenuRequested, this, &DownloadsWidget::handleDownloadsMenu);
+    connect(tableView->selectionModel(), &QItemSelectionModel::selectionChanged, this, [this](const QItemSelection &selected, const QItemSelection &deselected){
+        Q_UNUSED(selected)
+        Q_UNUSED(deselected)
+        tableView->setFocus();
+    });
+    connect(hideButton,     &ClickableLabel::clicked,        this, &DownloadsWidget::toggleSearchPanel);
+    connect(inputFilter,     &QLineEdit::textChanged,        this, &DownloadsWidget::onFilterUpdate);
+    connect(inputFilter,     &QLineEdit::returnPressed,      this, [this]() { proxyModel->setTextFilter(inputFilter->text()); });
+    connect(stateComboBox,   &QComboBox::currentTextChanged, this, &DownloadsWidget::onStateFilterUpdate);
+
+    shortcutSearch = new QShortcut(QKeySequence("Ctrl+F"), this);
+    shortcutSearch->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(shortcutSearch, &QShortcut::activated, this, &DownloadsWidget::toggleSearchPanel);
+
+    auto shortcutEsc = new QShortcut(QKeySequence(Qt::Key_Escape), inputFilter);
+    shortcutEsc->setContext(Qt::WidgetShortcut);
+    connect(shortcutEsc, &QShortcut::activated, this, [this]() { searchWidget->setVisible(false); });
+
+    this->dockWidget->setWidget(this);
 }
 
 void DownloadsWidget::createUI()
 {
-    tableWidget = new QTableWidget(this );
-    tableWidget->setColumnCount(10 );
-    tableWidget->setContextMenuPolicy( Qt::CustomContextMenu );
-    tableWidget->setAutoFillBackground( false );
-    tableWidget->setShowGrid( false );
-    tableWidget->setSortingEnabled( true );
-    tableWidget->setWordWrap( true );
-    tableWidget->setCornerButtonEnabled( true );
-    tableWidget->setSelectionBehavior( QAbstractItemView::SelectRows );
-    tableWidget->setSelectionMode( QAbstractItemView::SingleSelection );
-    tableWidget->setFocusPolicy( Qt::NoFocus );
-    tableWidget->setAlternatingRowColors( true );
-    tableWidget->horizontalHeader()->setSectionResizeMode( QHeaderView::Stretch );
-    tableWidget->horizontalHeader()->setCascadingSectionResizes( true );
-    tableWidget->horizontalHeader()->setHighlightSections( false );
-    tableWidget->verticalHeader()->setVisible( false );
+    auto horizontalSpacer = new QSpacerItem(40, 20, QSizePolicy::Expanding, QSizePolicy::Minimum);
 
-    tableWidget->setHorizontalHeaderItem( 0, new QTableWidgetItem( "File ID" ) );
-    tableWidget->setHorizontalHeaderItem( 1, new QTableWidgetItem( "Agent Type" ) );
-    tableWidget->setHorizontalHeaderItem( 2, new QTableWidgetItem( "Agent ID" ) );
-    tableWidget->setHorizontalHeaderItem( 3, new QTableWidgetItem( "User" ) );
-    tableWidget->setHorizontalHeaderItem( 4, new QTableWidgetItem( "Computer" ) );
-    tableWidget->setHorizontalHeaderItem( 5, new QTableWidgetItem( "File" ) );
-    tableWidget->setHorizontalHeaderItem( 6, new QTableWidgetItem( "Date" ) );
-    tableWidget->setHorizontalHeaderItem( 7, new QTableWidgetItem( "Size" ) );
-    tableWidget->setHorizontalHeaderItem( 8, new QTableWidgetItem( "Received" ) );
-    tableWidget->setHorizontalHeaderItem( 9, new QTableWidgetItem( "Progress" ) );
-    tableWidget->hideColumn( 0 );
+    searchWidget = new QWidget(this);
+    searchWidget->setVisible(false);
 
-    mainGridLayout = new QGridLayout(this );
-    mainGridLayout->setContentsMargins(0, 0, 0, 0 );
-    mainGridLayout->addWidget(tableWidget, 0, 0, 1, 4 );
+    inputFilter = new QLineEdit(searchWidget);
+    inputFilter->setPlaceholderText("filter: (exe | dll) & ^(temp)");
+    inputFilter->setMaximumWidth(300);
+
+    autoSearchCheck = new QCheckBox("auto", searchWidget);
+    autoSearchCheck->setChecked(true);
+    autoSearchCheck->setToolTip("Auto search on text change. If unchecked, press Enter to search.");
+
+    stateComboBox = new QComboBox(searchWidget);
+    stateComboBox->setMinimumWidth(100);
+    stateComboBox->addItems(QStringList() << "Any state" << "Running" << "Stopped" << "Finished");
+
+    hideButton = new ClickableLabel("  x  ");
+    hideButton->setCursor(Qt::PointingHandCursor);
+    hideButton->setStyleSheet("QLabel { color: #888; font-weight: bold; } QLabel:hover { color: #e34234; }");
+
+    searchLayout = new QHBoxLayout(searchWidget);
+    searchLayout->setContentsMargins(0, 5, 0, 0);
+    searchLayout->setSpacing(4);
+    searchLayout->addWidget(inputFilter);
+    searchLayout->addWidget(autoSearchCheck);
+    searchLayout->addSpacing(8);
+    searchLayout->addWidget(stateComboBox);
+    searchLayout->addSpacing(8);
+    searchLayout->addWidget(hideButton);
+    searchLayout->addSpacerItem(horizontalSpacer);
+
+    downloadsModel = new DownloadsTableModel(this);
+    proxyModel = new DownloadsFilterProxyModel(this);
+    proxyModel->setSourceModel(downloadsModel);
+    proxyModel->setFilterCaseSensitivity(Qt::CaseInsensitive);
+
+    tableView = new QTableView(this);
+    tableView->setModel(proxyModel);
+    tableView->setContextMenuPolicy(Qt::CustomContextMenu);
+    tableView->setAutoFillBackground(false);
+    tableView->setShowGrid(false);
+    tableView->setSortingEnabled(true);
+    tableView->setWordWrap(true);
+    tableView->setCornerButtonEnabled(false);
+    tableView->setSelectionBehavior(QAbstractItemView::SelectRows);
+    tableView->setFocusPolicy(Qt::NoFocus);
+    tableView->setAlternatingRowColors(true);
+    tableView->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    tableView->horizontalHeader()->setCascadingSectionResizes(true);
+    tableView->horizontalHeader()->setHighlightSections(false);
+    tableView->verticalHeader()->setVisible(false);
+
+    tableView->setItemDelegate(new PaddingDelegate(tableView));
+
+    proxyModel->sort(-1);
+
+    tableView->horizontalHeader()->setSectionResizeMode(DC_File, QHeaderView::Stretch);
+    tableView->setItemDelegateForColumn(DC_Progress, new ProgressBarDelegate(this));
+    tableView->hideColumn(DC_FileId);
+
+    mainGridLayout = new QGridLayout(this);
+    mainGridLayout->setContentsMargins(0, 0, 0, 0);
+    mainGridLayout->addWidget(searchWidget, 0, 0, 1, 1);
+    mainGridLayout->addWidget(tableView, 1, 0, 1, 1);
 }
 
 DownloadsWidget::~DownloadsWidget() = default;
 
-void DownloadsWidget::Clear() const
+void DownloadsWidget::SetUpdatesEnabled(bool enabled)
 {
-    adaptixWidget->Downloads.clear();
-    for (int index = tableWidget->rowCount(); index > 0; index-- )
-        tableWidget->removeRow(index -1 );
+    if (!enabled) {
+        bufferingEnabled = true;
+    } else {
+        bufferingEnabled = false;
+        flushPendingDownloads();
+    }
+
+    if (proxyModel)
+        proxyModel->setDynamicSortFilter(enabled);
+    if (tableView)
+        tableView->setSortingEnabled(enabled);
+
+    tableView->setUpdatesEnabled(enabled);
 }
 
-void DownloadsWidget::AddDownloadItem(const DownloadData &newDownload )
+void DownloadsWidget::flushPendingDownloads()
 {
-    if ( adaptixWidget->Downloads.contains(newDownload.FileId) )
+    if (pendingDownloads.isEmpty())
         return;
 
-    if( tableWidget->rowCount() < 1 )
-        tableWidget->setRowCount( 1 );
-    else
-        tableWidget->setRowCount( tableWidget->rowCount() + 1 );
+    QList<DownloadData> filtered;
+    {
+        QWriteLocker locker(&adaptixWidget->DownloadsLock);
+        int count = 0;
+        for (const auto& download : pendingDownloads) {
+            if (adaptixWidget->Downloads.contains(download.FileId))
+                continue;
 
-    auto item_FileID    = new QTableWidgetItem( newDownload.FileId );
-    auto item_AgentName = new QTableWidgetItem( newDownload.AgentName );
-    auto item_AgentID   = new QTableWidgetItem( newDownload.AgentId );
-    auto item_User      = new QTableWidgetItem( newDownload.User );
-    auto item_Computer  = new QTableWidgetItem( newDownload.Computer );
-    auto item_File      = new QTableWidgetItem( newDownload.Filename );
-    auto item_Date      = new QTableWidgetItem( newDownload.Date );
-    auto item_Size      = new QTableWidgetItem( BytesToFormat(newDownload.TotalSize) );
-    auto item_Received  = new QTableWidgetItem( BytesToFormat(newDownload.RecvSize) );
+            adaptixWidget->Downloads[download.FileId] = download;
+            filtered.append(download);
+        }
+    }
 
-    item_FileID->setTextAlignment( Qt::AlignCenter );
-    item_FileID->setFlags( item_FileID->flags() ^ Qt::ItemIsEditable );
+    if (!filtered.isEmpty())
+        downloadsModel->addBatch(filtered);
 
-    item_AgentName->setTextAlignment( Qt::AlignCenter );
-    item_AgentName->setFlags( item_AgentName->flags() ^ Qt::ItemIsEditable );
+    pendingDownloads.clear();
+}
 
-    item_AgentID->setTextAlignment( Qt::AlignCenter );
-    item_AgentID->setFlags( item_AgentID->flags() ^ Qt::ItemIsEditable );
+void DownloadsWidget::Clear() const
+{
+    {
+        QWriteLocker locker(&adaptixWidget->DownloadsLock);
+        adaptixWidget->Downloads.clear();
+    }
+    downloadsModel->clear();
+}
 
-    item_User->setTextAlignment( Qt::AlignCenter );
-    item_User->setFlags( item_User->flags() ^ Qt::ItemIsEditable );
+void DownloadsWidget::AddDownloadItem(const DownloadData &newDownload)
+{
+    if (bufferingEnabled) {
+        pendingDownloads.append(newDownload);
+        return;
+    }
 
-    item_Computer->setTextAlignment( Qt::AlignCenter );
-    item_Computer->setFlags( item_Computer->flags() ^ Qt::ItemIsEditable );
-
-    item_File->setTextAlignment( Qt::AlignCenter );
-    item_File->setFlags( item_File->flags() ^ Qt::ItemIsEditable );
-    item_File->setToolTip(item_File->text());
-
-    item_Date->setTextAlignment( Qt::AlignCenter );
-    item_Date->setFlags( item_Date->flags() ^ Qt::ItemIsEditable );
-
-    item_Size->setTextAlignment( Qt::AlignCenter );
-    item_Size->setFlags( item_Size->flags() ^ Qt::ItemIsEditable );
-
-    item_Received->setTextAlignment( Qt::AlignCenter );
-    item_Received->setFlags( item_Received->flags() ^ Qt::ItemIsEditable );
-
-    QProgressBar *pgbar = new QProgressBar(this);
-    pgbar->setMinimum(0);
-    pgbar->setMaximum(newDownload.TotalSize);
-    pgbar->setValue(newDownload.RecvSize);
-    int hSize = tableWidget->rowHeight(tableWidget->rowCount()-1);
-    pgbar->setMinimumSize(QSize(200,hSize));
-    pgbar->setMaximumSize(QSize(200,hSize));
-
-    bool isSortingEnabled = tableWidget->isSortingEnabled();
-    tableWidget->setSortingEnabled( false );
-    tableWidget->setItem( tableWidget->rowCount() - 1, 0, item_FileID );
-    tableWidget->setItem( tableWidget->rowCount() - 1, 1, item_AgentName );
-    tableWidget->setItem( tableWidget->rowCount() - 1, 2, item_AgentID );
-    tableWidget->setItem( tableWidget->rowCount() - 1, 3, item_User );
-    tableWidget->setItem( tableWidget->rowCount() - 1, 4, item_Computer );
-    tableWidget->setItem( tableWidget->rowCount() - 1, 5, item_File );
-    tableWidget->setItem( tableWidget->rowCount() - 1, 6, item_Date );
-    tableWidget->setItem( tableWidget->rowCount() - 1, 7, item_Size );
-    tableWidget->setItem( tableWidget->rowCount() - 1, 8, item_Received );
-    tableWidget->setCellWidget( tableWidget->rowCount() - 1, 9, pgbar );
-    tableWidget->setSortingEnabled( isSortingEnabled );
-
-    if( newDownload.State == DOWNLOAD_STATE_STOPPED )
-        pgbar->setEnabled(false);
-
-    tableWidget->horizontalHeader()->setSectionResizeMode( 1, QHeaderView::ResizeToContents );
-    tableWidget->horizontalHeader()->setSectionResizeMode( 2, QHeaderView::ResizeToContents );
-    tableWidget->horizontalHeader()->setSectionResizeMode( 3, QHeaderView::ResizeToContents );
-    tableWidget->horizontalHeader()->setSectionResizeMode( 4, QHeaderView::ResizeToContents );
-    tableWidget->horizontalHeader()->setSectionResizeMode( 6, QHeaderView::ResizeToContents );
-    tableWidget->horizontalHeader()->setSectionResizeMode( 7, QHeaderView::ResizeToContents );
-    tableWidget->horizontalHeader()->setSectionResizeMode( 8, QHeaderView::ResizeToContents );
-    tableWidget->horizontalHeader()->setSectionResizeMode( 9, QHeaderView::ResizeToContents );
-
-    tableWidget->verticalHeader()->setSectionResizeMode(tableWidget->rowCount() - 1, QHeaderView::ResizeToContents);
+    QWriteLocker locker(&adaptixWidget->DownloadsLock);
+    if (adaptixWidget->Downloads.contains(newDownload.FileId))
+        return;
 
     adaptixWidget->Downloads[newDownload.FileId] = newDownload;
+    locker.unlock();
+    downloadsModel->add(newDownload);
 }
 
-void DownloadsWidget::EditDownloadItem(const QString &fileId, const int recvSize, const int state) const
+void DownloadsWidget::EditDownloadItem(const QString &fileId, int recvSize, int state)
 {
-    adaptixWidget->Downloads[fileId].RecvSize = recvSize;
-    adaptixWidget->Downloads[fileId].State    = state;
+    {
+        QWriteLocker locker(&adaptixWidget->DownloadsLock);
+        if (!adaptixWidget->Downloads.contains(fileId))
+            return;
 
-    for (int row = 0; row < tableWidget->rowCount(); ++row) {
-        QTableWidgetItem *item = tableWidget->item(row, 0);
-        if ( item && item->text() == fileId ) {
-            tableWidget->item(row, 8)->setText(BytesToFormat(recvSize) );
+        adaptixWidget->Downloads[fileId].RecvSize = recvSize;
+        adaptixWidget->Downloads[fileId].State = state;
 
-            QProgressBar *pgbar = static_cast<QProgressBar *>(tableWidget->cellWidget(row, 9));
-            pgbar->setValue(recvSize);
+        if (state == DOWNLOAD_STATE_FINISHED)
+            adaptixWidget->Downloads[fileId].RecvSize = adaptixWidget->Downloads[fileId].TotalSize;
 
-            if( state == DOWNLOAD_STATE_STOPPED) {
-                pgbar->setEnabled(false);
-            }
-            else if(state == DOWNLOAD_STATE_RUNNING) {
-                pgbar->setEnabled(true);
-            }
-            else if (state == DOWNLOAD_STATE_FINISHED) {
-                adaptixWidget->Downloads[fileId].RecvSize = adaptixWidget->Downloads[fileId].TotalSize;
+        if (state == DOWNLOAD_STATE_CANCELED)
+            adaptixWidget->Downloads.remove(fileId);
+    }
 
-                tableWidget->item( row, 8 )->setText("");
+    if (state == DOWNLOAD_STATE_CANCELED) {
+        QStringList fileIds;
+        fileIds.append(fileId);
+        downloadsModel->remove(fileIds);
+    } else {
+        downloadsModel->update(fileId, recvSize, state);
+    }
+}
 
-                auto item_Status = new QTableWidgetItem( "Finished" );
-                item_Status->setTextAlignment( Qt::AlignCenter );
-                tableWidget->removeCellWidget(row,9);
-                tableWidget->setItem(row, 9, item_Status);
-                tableWidget->item(row, 9)->setForeground(QColor(COLOR_NeonGreen));
-            }
-            else if (state == DOWNLOAD_STATE_CANCELED) {
-                tableWidget->removeCellWidget(row,9);
-                tableWidget->removeRow( row );
+void DownloadsWidget::RemoveDownloadItem(const QStringList &filesId)
+{
+    QStringList filtered;
+    {
+        QWriteLocker locker(&adaptixWidget->DownloadsLock);
+        for (auto fileId : filesId) {
+            if (adaptixWidget->Downloads.contains(fileId)) {
                 adaptixWidget->Downloads.remove(fileId);
+                filtered.append(fileId);
             }
-
-            break;
         }
     }
+    downloadsModel->remove(filtered);
 }
 
-void DownloadsWidget::RemoveDownloadItem(const QString &fileId) const
+QString DownloadsWidget::getSelectedFileId() const
 {
-    adaptixWidget->Downloads.remove(fileId);
+    QModelIndexList selected = tableView->selectionModel()->selectedRows();
+    if (selected.isEmpty())
+        return {};
 
-    for ( int row = 0; row < tableWidget->rowCount(); row++ ) {
-        if ( tableWidget->item( row, 0 )->text() == fileId ) {
-            tableWidget->removeRow( row );
-            break;
-        }
-    }
+    QModelIndex sourceIndex = proxyModel->mapToSource(selected.first());
+    return downloadsModel->getFileIdAt(sourceIndex.row());
+}
+
+const DownloadData* DownloadsWidget::getSelectedDownload() const
+{
+    QString fileId = getSelectedFileId();
+    if (fileId.isEmpty())
+        return nullptr;
+    return downloadsModel->getById(fileId);
 }
 
 /// SLOTS
 
-void DownloadsWidget::handleDownloadsMenu(const QPoint &pos )
+void DownloadsWidget::toggleSearchPanel() const
 {
-    if ( !tableWidget->itemAt(pos) )
+    if (this->searchWidget->isVisible()) {
+        this->searchWidget->setVisible(false);
+        proxyModel->setSearchVisible(false);
+    }
+    else {
+        this->searchWidget->setVisible(true);
+        proxyModel->setSearchVisible(true);
+        inputFilter->setFocus();
+    }
+}
+
+void DownloadsWidget::onFilterUpdate() const
+{
+    if (autoSearchCheck->isChecked()) {
+        proxyModel->setTextFilter(inputFilter->text());
+    }
+    inputFilter->setFocus();
+    tableView->horizontalHeader()->resizeSections(QHeaderView::ResizeToContents);
+    tableView->horizontalHeader()->setSectionResizeMode(DC_File, QHeaderView::Stretch);
+}
+
+void DownloadsWidget::onStateFilterUpdate() const
+{
+    int idx = stateComboBox->currentIndex();
+    if (idx == 0)
+        proxyModel->setStateFilter(-1);
+    else
+        proxyModel->setStateFilter(idx);
+    tableView->horizontalHeader()->resizeSections(QHeaderView::ResizeToContents);
+    tableView->horizontalHeader()->setSectionResizeMode(DC_File, QHeaderView::Stretch);
+}
+
+void DownloadsWidget::handleDownloadsMenu(const QPoint &pos)
+{
+    QModelIndex index = tableView->indexAt(pos);
+    if (!index.isValid())
+        return;
+
+    const DownloadData* download = getSelectedDownload();
+    if (!download)
         return;
 
     QVector<DataMenuDownload> files;
-
     DataMenuDownload data = {};
-    data.agentId = tableWidget->item( tableWidget->currentRow(), 2 )->text();
-    data.fileId  = tableWidget->item( tableWidget->currentRow(), 0 )->text();
-    data.path    = tableWidget->item( tableWidget->currentRow(), 5 )->text();
+    data.agentId = download->AgentId;
+    data.fileId  = download->FileId;
+    data.path    = download->Filename;
 
     auto ctxMenu = QMenu();
-    auto Received = tableWidget->item( tableWidget->currentRow(), 8 )->text();
-    if(Received.compare("") == 0) {
+
+    if (download->State == DOWNLOAD_STATE_FINISHED) {
         ctxMenu.addAction("Sync file to client", this, &DownloadsWidget::actionSync);
 
         auto syncMenu = new QMenu("Sync as ...", &ctxMenu);
@@ -227,89 +306,86 @@ void DownloadsWidget::handleDownloadsMenu(const QPoint &pos )
 
         data.state = "finished";
         files.append(data);
-        int menuCount = adaptixWidget->ScriptManager->AddMenuDownload(&ctxMenu, "DownloadFinished", files);
+        int menuCount = adaptixWidget->ScriptManager->AddMenuDownload(&ctxMenu, "DownloadFinished", files, false);
         if (menuCount > 0)
             ctxMenu.addSeparator();
 
-        ctxMenu.addAction("Delete file", this, &DownloadsWidget::actionDelete );
+        ctxMenu.addAction("Delete file", this, &DownloadsWidget::actionDelete);
     }
     else {
-        if( tableWidget->cellWidget( tableWidget->currentRow(), 9)->isEnabled() ) {
+        if (download->State == DOWNLOAD_STATE_RUNNING) {
             data.state = "running";
-            files.append(data);
-        }
-        else {
+        } else {
             data.state = "stopped";
-            files.append(data);
         }
-        adaptixWidget->ScriptManager->AddMenuDownload(&ctxMenu, "DownloadRunning", files);
+        files.append(data);
+        adaptixWidget->ScriptManager->AddMenuDownload(&ctxMenu, "DownloadRunning", files, true);
     }
 
-    ctxMenu.exec(tableWidget->horizontalHeader()->viewport()->mapToGlobal(pos) );
+    ctxMenu.exec(tableView->viewport()->mapToGlobal(pos));
 }
 
-void DownloadsWidget::actionSync() const
+void DownloadsWidget::actionSync()
 {
-    if( tableWidget->item( tableWidget->currentRow(), 8 )->text() != "" )
+    const DownloadData* download = getSelectedDownload();
+    if (!download || download->State != DOWNLOAD_STATE_FINISHED)
         return;
 
-    QString fileId   = tableWidget->item( tableWidget->currentRow(), 0 )->text();
-    QString filePath = tableWidget->item( tableWidget->currentRow(), 5 )->text();
+    QString fileId   = download->FileId;
+    QString filePath = download->Filename;
 
     QString message = QString();
     bool ok = false;
     bool result = HttpReqGetOTP("download", fileId, *adaptixWidget->GetProfile(), &message, &ok);
-    if( !result ) {
+    if (!result) {
         MessageError("Response timeout");
         return;
     }
-    if ( !ok ) {
+    if (!ok) {
         MessageError(message);
         return;
     }
     QString otp = message;
+    QString fileName = extractFileName(filePath);
 
-    QStringList pathParts = filePath.split("\\", Qt::SkipEmptyParts);
-    QString fileName =  pathParts[pathParts.size()-1];
-    pathParts = fileName.split("/", Qt::SkipEmptyParts);
-    fileName = pathParts[pathParts.size()-1];
+    QString baseDir = fileName;
+    if (adaptixWidget && adaptixWidget->GetProfile())
+        baseDir = QDir(adaptixWidget->GetProfile()->GetProjectDir()).filePath(fileName);
 
-    QString savedPath = QFileDialog::getSaveFileName( nullptr, "Save File", fileName, "All Files (*.*)" );
-    if (savedPath.isEmpty())
-        return;
+    NonBlockingDialogs::getSaveFileName(this, "Save File", baseDir, "All Files (*.*)",
+        [this, otp](const QString& savedPath) {
+            if (savedPath.isEmpty())
+                return;
 
-    QString sUrl = adaptixWidget->GetProfile()->GetURL() + "/otp/download/sync";
+            QString sUrl = adaptixWidget->GetProfile()->GetURL() + "/otp/download/sync";
 
-    DialogDownloader dialog(sUrl, otp, savedPath);
-    dialog.exec();
+            DialogDownloader dialog(sUrl, otp, savedPath);
+            dialog.exec();
+    });
 }
 
-void DownloadsWidget::actionSyncCurl() const
+void DownloadsWidget::actionSyncCurl()
 {
-    if( tableWidget->item( tableWidget->currentRow(), 8 )->text() != "" )
+    const DownloadData* download = getSelectedDownload();
+    if (!download || download->State != DOWNLOAD_STATE_FINISHED)
         return;
 
-    QString fileId   = tableWidget->item( tableWidget->currentRow(), 0 )->text();
-    QString filePath = tableWidget->item( tableWidget->currentRow(), 5 )->text();
+    QString fileId   = download->FileId;
+    QString filePath = download->Filename;
 
     QString message = QString();
     bool ok = false;
     bool result = HttpReqGetOTP("download", fileId, *adaptixWidget->GetProfile(), &message, &ok);
-    if( !result ) {
+    if (!result) {
         MessageError("Response timeout");
         return;
     }
-    if ( !ok ) {
+    if (!ok) {
         MessageError(message);
         return;
     }
     QString otp = message;
-
-    QStringList pathParts = filePath.split("\\", Qt::SkipEmptyParts);
-    QString fileName =  pathParts[pathParts.size()-1];
-    pathParts = fileName.split("/", Qt::SkipEmptyParts);
-    fileName = pathParts[pathParts.size()-1];
-
+    QString fileName = extractFileName(filePath);
     QString sUrl = adaptixWidget->GetProfile()->GetURL() + "/otp/download/sync";
 
     QString command = QString("curl -k %1 -H 'OTP: %2' -o %3").arg(sUrl).arg(otp).arg(fileName);
@@ -319,66 +395,68 @@ void DownloadsWidget::actionSyncCurl() const
     inputDialog.setLabelText("Curl command:");
     inputDialog.setTextEchoMode(QLineEdit::Normal);
     inputDialog.setTextValue(command);
-    inputDialog.setFixedSize(700,60);
+    inputDialog.setFixedSize(700, 60);
     inputDialog.move(QGuiApplication::primaryScreen()->geometry().center() - inputDialog.geometry().center());
     inputDialog.exec();
 }
 
-void DownloadsWidget::actionSyncWget() const
+void DownloadsWidget::actionSyncWget()
 {
-    if( tableWidget->item( tableWidget->currentRow(), 8 )->text() != "" )
+    const DownloadData* download = getSelectedDownload();
+    if (!download || download->State != DOWNLOAD_STATE_FINISHED)
         return;
 
-    QString fileId   = tableWidget->item( tableWidget->currentRow(), 0 )->text();
-    QString filePath = tableWidget->item( tableWidget->currentRow(), 5 )->text();
+    QString fileId   = download->FileId;
+    QString filePath = download->Filename;
 
     QString message = QString();
     bool ok = false;
     bool result = HttpReqGetOTP("download", fileId, *adaptixWidget->GetProfile(), &message, &ok);
-    if( !result ) {
+    if (!result) {
         MessageError("Response timeout");
         return;
     }
-    if ( !ok ) {
+    if (!ok) {
         MessageError(message);
         return;
     }
     QString otp = message;
-
-    QStringList pathParts = filePath.split("\\", Qt::SkipEmptyParts);
-    QString fileName =  pathParts[pathParts.size()-1];
-    pathParts = fileName.split("/", Qt::SkipEmptyParts);
-    fileName = pathParts[pathParts.size()-1];
-
+    QString fileName = extractFileName(filePath);
     QString sUrl = adaptixWidget->GetProfile()->GetURL() + "/otp/download/sync";
 
     QString command = QString("wget --no-check-certificate %1 --header='OTP: %2' -O %3").arg(sUrl).arg(otp).arg(fileName);
 
     QInputDialog inputDialog;
-    inputDialog.setWindowTitle("Sync file as curl");
-    inputDialog.setLabelText("Curl command:");
+    inputDialog.setWindowTitle("Sync file as wget");
+    inputDialog.setLabelText("Wget command:");
     inputDialog.setTextEchoMode(QLineEdit::Normal);
     inputDialog.setTextValue(command);
-    inputDialog.setFixedSize(700,60);
+    inputDialog.setFixedSize(700, 60);
     inputDialog.move(QGuiApplication::primaryScreen()->geometry().center() - inputDialog.geometry().center());
     inputDialog.exec();
 }
 
-void DownloadsWidget::actionDelete() const
+void DownloadsWidget::actionDelete()
 {
-    if( tableWidget->item( tableWidget->currentRow(), 8 )->text() == "" ) {
+    QStringList files;
+    QModelIndexList selectedRows = tableView->selectionModel()->selectedRows();
+    for (const QModelIndex &proxyIndex : selectedRows) {
+        QModelIndex sourceIndex = proxyModel->mapToSource(proxyIndex);
+        if (!sourceIndex.isValid()) continue;
 
-        QString fileId = tableWidget->item(tableWidget->currentRow(), 0)->text();
-        QString message = QString();
-        bool ok = false;
-        bool result = HttpReqDownloadAction("delete", fileId, *(adaptixWidget->GetProfile()), &message, &ok);
-        if (!result) {
-            MessageError("Response timeout");
-            return;
-        }
-
-        if (!ok) {
-            MessageError(message);
-        }
+        QString fileId = downloadsModel->data(downloadsModel->index(sourceIndex.row(), DC_FileId), Qt::DisplayRole).toString();
+        files.append(fileId);
     }
+
+    for (auto fileId : files) {
+        if ( downloadsModel->getById(fileId)->State != DOWNLOAD_STATE_FINISHED)
+            files.removeAll(fileId);
+    }
+    if (files.isEmpty())
+        return;
+
+    HttpReqDownloadDelete(files, *(adaptixWidget->GetProfile()), [](bool success, const QString& message, const QJsonObject&) {
+        if (!success)
+            MessageError(message.isEmpty() ? "Response timeout" : message);
+    });
 }

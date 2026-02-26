@@ -1,17 +1,60 @@
 package server
 
 import (
+	"AdaptixServer/core/eventing"
 	"AdaptixServer/core/utils/krypt"
 	"AdaptixServer/core/utils/logs"
 	"AdaptixServer/core/utils/tformat"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"time"
 
 	adaptix "github.com/Adaptix-Framework/axc2"
 )
 
+func (ts *Teamserver) TsScreenshotList() (string, error) {
+	var screens []adaptix.ScreenData
+	ts.screenshots.ForEach(func(key string, value interface{}) bool {
+		screenData := value.(adaptix.ScreenData)
+		screenData.LocalPath = "******"
+		screenData.Content = nil
+		screens = append(screens, screenData)
+		return true
+	})
+
+	jsonScreenshot, err := json.Marshal(screens)
+	if err != nil {
+		return "", err
+	}
+	return string(jsonScreenshot), nil
+}
+
+func (ts *Teamserver) TsScreenshotGetImage(screenId string) ([]byte, error) {
+	value, ok := ts.screenshots.Get(screenId)
+	if !ok {
+		return []byte(""), errors.New("Screen not found: " + screenId)
+	}
+	screenData := value.(adaptix.ScreenData)
+	return screenData.Content, nil
+}
+
 func (ts *Teamserver) TsScreenshotAdd(agentId string, Note string, Content []byte) error {
+	// --- PRE HOOK ---
+	preEvent := &eventing.EventDataScreenshotAdd{
+		AgentId: agentId,
+		Note:    Note,
+		Content: Content,
+	}
+	if !ts.EventManager.Emit(eventing.EventScreenshotAdd, eventing.HookPre, preEvent) {
+		if preEvent.Error != nil {
+			return preEvent.Error
+		}
+		return fmt.Errorf("operation cancelled by hook")
+	}
+	// ----------------
+
 	screenData := adaptix.ScreenData{
 		Note:    Note,
 		Date:    time.Now().Unix(),
@@ -23,14 +66,18 @@ func (ts *Teamserver) TsScreenshotAdd(agentId string, Note string, Content []byt
 		return err
 	}
 
-	value, ok := ts.agents.Get(agentId)
-	if ok {
-		screenData.User = value.(*Agent).Data.Username
-		screenData.Computer = value.(*Agent).Data.Computer
-		screenData.ScreenId, _ = krypt.GenerateUID(8)
-	} else {
+	value, ok := ts.Agents.Get(agentId)
+	if !ok {
 		return errors.New("Agent not found: " + agentId)
 	}
+	agent, ok := value.(*Agent)
+	if !ok {
+		return errors.New("Invalid agent type: " + agentId)
+	}
+	agentData := agent.GetData()
+	screenData.User = agentData.Username
+	screenData.Computer = agentData.Computer
+	screenData.ScreenId, _ = krypt.GenerateUID(8)
 
 	d := time.Now().Format("15:04:05 02.01.2006")
 	saveName := krypt.MD5(append([]byte(d), screenData.Content...)) + "." + format
@@ -55,7 +102,16 @@ func (ts *Teamserver) TsScreenshotAdd(agentId string, Note string, Content []byt
 	_ = ts.DBMS.DbScreenshotInsert(screenData)
 
 	packet := CreateSpScreenshotCreate(screenData)
-	ts.TsSyncAllClients(packet)
+	ts.TsSyncAllClientsWithCategory(packet, SyncCategoryScreenshotRealtime)
+
+	// --- POST HOOK ---
+	postEvent := &eventing.EventDataScreenshotAdd{
+		AgentId: agentId,
+		Note:    Note,
+		Content: Content,
+	}
+	ts.EventManager.EmitAsync(eventing.EventScreenshotAdd, postEvent)
+	// -----------------
 
 	return nil
 }
@@ -72,12 +128,22 @@ func (ts *Teamserver) TsScreenshotNote(screenId string, note string) error {
 
 	_ = ts.DBMS.DbScreenshotUpdate(screenId, note)
 	packet := CreateSpScreenshotUpdate(screenId, note)
-	ts.TsSyncAllClients(packet)
+	ts.TsSyncStateWithCategory(packet, "screenshot:"+screenId, SyncCategoryScreenshotRealtime)
 
 	return nil
 }
 
 func (ts *Teamserver) TsScreenshotDelete(screenId string) error {
+	// --- PRE HOOK ---
+	preEvent := &eventing.EventDataScreenshotRemove{ScreenId: screenId}
+	if !ts.EventManager.Emit(eventing.EventScreenshotRemove, eventing.HookPre, preEvent) {
+		if preEvent.Error != nil {
+			return preEvent.Error
+		}
+		return fmt.Errorf("operation cancelled by hook")
+	}
+	// ----------------
+
 	value, ok := ts.screenshots.Get(screenId)
 	if !ok {
 		return errors.New("Screen not found: " + screenId)
@@ -88,8 +154,14 @@ func (ts *Teamserver) TsScreenshotDelete(screenId string) error {
 
 	_ = ts.DBMS.DbScreenshotDelete(screenId)
 	packet := CreateSpScreenshotDelete(screenId)
-	ts.TsSyncAllClients(packet)
+	ts.TsSyncAllClientsWithCategory(packet, SyncCategoryScreenshotRealtime)
 
 	ts.screenshots.Delete(screenId)
+
+	// --- POST HOOK ---
+	postEvent := &eventing.EventDataScreenshotRemove{ScreenId: screenId}
+	ts.EventManager.EmitAsync(eventing.EventScreenshotRemove, postEvent)
+	// -----------------
+
 	return nil
 }

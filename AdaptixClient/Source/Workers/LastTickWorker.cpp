@@ -1,5 +1,4 @@
 #include <Agent/Agent.h>
-#include <Agent/AgentTableWidgetItem.h>
 #include <Workers/LastTickWorker.h>
 #include <UI/Widgets/AdaptixWidget.h>
 #include <Client/Settings.h>
@@ -9,19 +8,45 @@
 LastTickWorker::LastTickWorker(AdaptixWidget *w)
 {
     mainWidget = w;
-    timer = new QTimer(this);
 }
 
-LastTickWorker::~LastTickWorker() = default;
+LastTickWorker::~LastTickWorker()
+{
+    if (isRunning()) {
+        QMetaObject::invokeMethod(this, "stopWorker", Qt::QueuedConnection);
+        wait(5000);
+        if (isRunning()) {
+            terminate();
+            wait();
+        }
+    }
+}
 
 void LastTickWorker::run()
 {
+    timer = new QTimer();
     QObject::connect( timer, &QTimer::timeout, this, &LastTickWorker::updateLastItems );
-    timer->start( 1000 );
+    timer->start( 500 );
+
+    exec();
 }
 
-void LastTickWorker::updateLastItems() const
+void LastTickWorker::stopWorker()
 {
+    if (timer) {
+        timer->stop();
+        disconnect(timer, nullptr, nullptr, nullptr);
+        delete timer;
+        timer = nullptr;
+    }
+    quit();
+}
+
+void LastTickWorker::updateLastItems()
+{
+    QStringList updatedAgents;
+
+    QReadLocker locker(&mainWidget->AgentsMapLock);
     for ( auto agent : mainWidget->AgentsMap ) {
         if ( agent->data.Async && agent->active ) {
             int current = QDateTime::currentSecsSinceEpoch();
@@ -38,27 +63,39 @@ void LastTickWorker::updateLastItems() const
                 int nowH = Now.time().hour() + agent->data.GmtOffset;
                 int nowM = Now.time().minute();
 
-
                 if ( startH < nowH && nowH < endH  ){}
                 else if ( startH == nowH && startH != endH && startM <= nowM ){}
                 else if ( endH == nowH && startM <= nowM && nowM < endM ){}
                 else {
                     isOffHours = true;
-                    agent->MarkItem("No worktime");
+                    if (agent->data.Mark != "No worktime")
+                        agent->MarkItem("No worktime");
                 }
             }
 
             if ( GlobalClient->settings->data.CheckHealth && !isOffHours ) {
                 if (diff > agent->data.Sleep * GlobalClient->settings->data.HealthCoaf + GlobalClient->settings->data.HealthOffset) {
-                    agent->item_Last->setText( FormatSecToStr(diff) + " / " + FormatSecToStr(agent->data.Sleep));
-                    agent->MarkItem("No response");
+
+                    if (diff > 24 * 3600)
+                        agent->LastMark = UnixTimestampGlobalToStringLocalSmall(agent->data.LastTick);
+                    else
+                        agent->LastMark = FormatSecToStr(diff) + " / " + FormatSecToStr(agent->data.Sleep);
+
+                    if (agent->data.Mark != "No response")
+                        agent->MarkItem("No response");
+
+                    updatedAgents.append(agent->data.Id);
                     continue;
                 }
                 else {
                     agent->MarkItem("");
                 }
             }
-            agent->item_Last->setText( FormatSecToStr(diff) );
+            agent->LastMark = FormatSecToStr(diff);
+            updatedAgents.append(agent->data.Id);
         }
     }
+
+    if (!updatedAgents.isEmpty())
+        Q_EMIT agentsUpdated(updatedAgents);
 }

@@ -3,12 +3,14 @@ package server
 import (
 	"AdaptixServer/core/connector"
 	"AdaptixServer/core/database"
+	"AdaptixServer/core/eventing"
 	"AdaptixServer/core/extender"
 	"AdaptixServer/core/profile"
 	"AdaptixServer/core/utils/safe"
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 
 	"github.com/Adaptix-Framework/axc2"
 	"github.com/gorilla/websocket"
@@ -25,32 +27,6 @@ const (
 	CONSOLE_OUT               = 10
 )
 
-const (
-	TYPE_TASK       = 1
-	TYPE_BROWSER    = 2
-	TYPE_JOB        = 3
-	TYPE_TUNNEL     = 4
-	TYPE_PROXY_DATA = 5
-)
-
-const (
-	TUNNEL_SOCKS4      = 1
-	TUNNEL_SOCKS5      = 2
-	TUNNEL_SOCKS5_AUTH = 3
-	TUNNEL_LPORTFWD    = 4
-	TUNNEL_RPORTFWD    = 5
-)
-
-// TeamServer
-
-type Client struct {
-	username   string
-	synced     bool
-	lockSocket *sync.Mutex
-	socket     *websocket.Conn
-	tmp_store  *safe.Slice
-}
-
 type TsParameters struct {
 	Interfaces []string
 }
@@ -62,31 +38,39 @@ type Teamserver struct {
 	Extender      *extender.AdaptixExtender
 	Parameters    TsParameters
 
+	TaskManager   *TaskManager
+	Broker        *MessageBroker
+	TunnelManager *TunnelManager
+	EventManager  *eventing.EventManager
+
 	listener_configs safe.Map // listenerFullName string : listenerInfo extender.ListenerInfo
 	agent_configs    safe.Map // agentName string        : agentInfo extender.AgentInfo
+	service_configs  safe.Map // serviceName string      : serviceInfo extender.ServiceInfo
 
 	wm_agent_types map[string]string   // agentMark string : agentName string
 	wm_listeners   map[string][]string // watermark string : ListenerName string, ListenerType string
 
-	events      *safe.Slice // 			           : sync_packet interface{}
-	clients     safe.Map    // username string     : socket *websocket.Conn
-	agents      safe.Map    // agentId string      : agent *Agent
-	listeners   safe.Map    // listenerName string : listenerData ListenerData
-	downloads   safe.Map    // fileId string       : downloadData DownloadData
-	tmp_uploads safe.Map    // fileId string       : uploadData UploadData
-	screenshots safe.Map    // screeId string      : screenData ScreenDataData
-	credentials *safe.Slice
-	targets     *safe.Slice
-	tunnels     safe.Map    // tunnelId string     : tunnel Tunnel
-	terminals   safe.Map    // terminalId string   : terminal Terminal
-	pivots      *safe.Slice // 			           : PivotData
-	otps        safe.Map    // otp string		   : Id string
+	notifications *safe.Slice // 			       : sync_packet interface{}
+	Agents        safe.Map    // agentId string      : agent *Agent
+	listeners     safe.Map    // listenerName string : listenerData ListenerData
+	messages      *safe.Slice //                     : chatData ChatData
+	downloads     safe.Map    // fileId string       : downloadData DownloadData
+	tmp_uploads   safe.Map    // fileId string       : uploadData UploadData
+	screenshots   safe.Map    // screeId string      : screenData ScreenDataData
+	credentials   *safe.Slice
+	targets       *safe.Slice
+	terminals     safe.Map    // terminalId string   : terminal Terminal
+	pivots        *safe.Slice // 			           : PivotData
+	otps          safe.Map    // otp string		   : Id string
+	builders      safe.Map    // buildId string      : build Build
 }
 
 type Agent struct {
-	Data   adaptix.AgentData
-	Tick   bool
-	Active bool
+	mu       sync.RWMutex
+	data     adaptix.AgentData
+	Extender adaptix.ExtenderAgent
+	Tick     bool
+	Active   bool
 
 	OutConsole *safe.Slice //  sync_packet interface{}
 
@@ -100,6 +84,58 @@ type Agent struct {
 
 	PivotParent *adaptix.PivotData
 	PivotChilds *safe.Slice
+}
+
+func (a *Agent) GetData() adaptix.AgentData {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.data
+}
+
+func (a *Agent) SetData(data adaptix.AgentData) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.data = data
+}
+
+func (a *Agent) UpdateData(fn func(*adaptix.AgentData)) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	fn(&a.data)
+}
+
+func (a *Agent) Command(args map[string]any) (adaptix.TaskData, adaptix.ConsoleMessageData, error) {
+	return a.Extender.CreateCommand(a.GetData(), args)
+}
+
+func (a *Agent) ProcessData(packedData []byte) error {
+	data := a.GetData()
+	decrypted, err := a.Extender.Decrypt(packedData, data.SessionKey)
+	if err != nil {
+		return err
+	}
+	return a.Extender.ProcessData(data, decrypted)
+}
+
+func (a *Agent) PackData(tasks []adaptix.TaskData) ([]byte, error) {
+	data := a.GetData()
+	packed, err := a.Extender.PackTasks(data, tasks)
+	if err != nil {
+		return nil, err
+	}
+	return a.Extender.Encrypt(packed, data.SessionKey)
+}
+
+func (a *Agent) PivotPackData(pivotId string, data []byte) (adaptix.TaskData, error) {
+	return a.Extender.PivotPackData(pivotId, data)
+}
+
+func (a *Agent) TunnelCallbacks() adaptix.TunnelCallbacks {
+	return a.Extender.TunnelCallbacks()
+}
+
+func (a *Agent) TerminalCallbacks() adaptix.TerminalCallbacks {
+	return a.Extender.TerminalCallbacks()
 }
 
 type HookJob struct {
@@ -121,6 +157,10 @@ type TunnelChannel struct {
 
 	pwTun *io.PipeWriter
 	prTun *io.PipeReader
+
+	ingressChan chan []byte
+	paused      atomic.Bool
+	flowPaused  atomic.Bool
 }
 
 type Tunnel struct {
@@ -132,19 +172,17 @@ type Tunnel struct {
 	listener    net.Listener
 	connections safe.Map
 
-	handlerConnectTCP func(channelId int, addr string, port int) adaptix.TaskData
-	handlerConnectUDP func(channelId int, addr string, port int) adaptix.TaskData
-	handlerWriteTCP   func(channelId int, data []byte) adaptix.TaskData
-	handlerWriteUDP   func(channelId int, data []byte) adaptix.TaskData
-	handlerClose      func(channelId int) adaptix.TaskData
-	handlerReverse    func(tunnelId int, port int) adaptix.TaskData
+	Callbacks adaptix.TunnelCallbacks
 }
 
 type Terminal struct {
 	TaskId     string
 	TerminalId int
+	CodePage   int
 
-	agent *Agent
+	agent  *Agent
+	mu     sync.Mutex
+	closed bool
 
 	wsconn *websocket.Conn
 
@@ -154,9 +192,18 @@ type Terminal struct {
 	pwTun *io.PipeWriter
 	prTun *io.PipeReader
 
-	handlerStart func(terminalId int, program string, sizeH int, sizeW int) (adaptix.TaskData, error)
-	handlerWrite func(terminalId int, data []byte) (adaptix.TaskData, error)
-	handlerClose func(terminalId int) (adaptix.TaskData, error)
+	Callbacks adaptix.TerminalCallbacks
+}
+
+type AgentBuilder struct {
+	Id            string
+	Name          string
+	ListenersName []string
+	Config        string
+
+	wsconn *websocket.Conn
+	mu     sync.Mutex
+	closed bool
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////
@@ -174,12 +221,23 @@ type SyncPackerFinish struct {
 	SpType int `json:"type"`
 }
 
-type SpEvent struct {
+type SyncPackerBatch struct {
+	SpType  int           `json:"type"`
+	Packets []interface{} `json:"packets"`
+}
+
+type SyncPackerCategoryBatch struct {
+	SpType   int           `json:"type"`
+	Category string        `json:"category"` // "agents", "events", "console", "tasks", etc.
+	Packets  []interface{} `json:"packets"`
+}
+
+type SpNotification struct {
 	Type int `json:"type"`
 
-	EventType int    `json:"event_type"`
-	Date      int64  `json:"date"`
-	Message   string `json:"message"`
+	NotifyType int    `json:"event_type"`
+	Date       int64  `json:"date"`
+	Message    string `json:"message"`
 }
 
 /// LISTENER
@@ -203,6 +261,7 @@ type SyncPackerListenerStart struct {
 	BindHost         string `json:"l_bind_host"`
 	BindPort         string `json:"l_bind_port"`
 	AgentAddrs       string `json:"l_agent_addr"`
+	CreateTime       int64  `json:"l_create_time"`
 	ListenerStatus   string `json:"l_status"`
 	Data             string `json:"l_data"`
 }
@@ -218,9 +277,26 @@ type SyncPackerListenerStop struct {
 type SyncPackerAgentReg struct {
 	SpType int `json:"type"`
 
-	Agent     string   `json:"agent"`
-	AX        string   `json:"ax"`
-	Listeners []string `json:"listeners"`
+	Agent          string   `json:"agent"`
+	AX             string   `json:"ax"`
+	Listeners      []string `json:"listeners"`
+	MultiListeners bool     `json:"multi_listeners"`
+}
+
+/// SERVICE
+
+type SyncPackerServiceReg struct {
+	SpType int `json:"type"`
+
+	Name string `json:"service"`
+	AX   string `json:"ax"`
+}
+
+type SyncPackerServiceData struct {
+	SpType int `json:"type"`
+
+	Service string `json:"service"`
+	Data    string `json:"data"`
 }
 
 type SyncPackerAgentNew struct {
@@ -237,6 +313,8 @@ type SyncPackerAgentNew struct {
 	KillDate     int    `json:"a_killdate"`
 	Sleep        uint   `json:"a_sleep"`
 	Jitter       uint   `json:"a_jitter"`
+	ACP          int    `json:"a_acp"`
+	OemCP        int    `json:"a_oemcp"`
 	Pid          string `json:"a_pid"`
 	Tid          string `json:"a_tid"`
 	Arch         string `json:"a_arch"`
@@ -248,6 +326,7 @@ type SyncPackerAgentNew struct {
 	Computer     string `json:"a_computer"`
 	Username     string `json:"a_username"`
 	Impersonated string `json:"a_impersonated"`
+	CreateTime   int64  `json:"a_create_time"`
 	LastTick     int    `json:"a_last_tick"`
 	Tags         string `json:"a_tags"`
 	Mark         string `json:"a_mark"`
@@ -257,15 +336,31 @@ type SyncPackerAgentNew struct {
 type SyncPackerAgentUpdate struct {
 	SpType int `json:"type"`
 
-	Id           string `json:"a_id"`
-	Sleep        uint   `json:"a_sleep"`
-	Jitter       uint   `json:"a_jitter"`
-	WorkingTime  int    `json:"a_workingtime"`
-	KillDate     int    `json:"a_killdate"`
-	Impersonated string `json:"a_impersonated"`
-	Tags         string `json:"a_tags"`
-	Mark         string `json:"a_mark"`
-	Color        string `json:"a_color"`
+	Id           string  `json:"a_id"`
+	Sleep        *uint   `json:"a_sleep,omitempty"`
+	Jitter       *uint   `json:"a_jitter,omitempty"`
+	WorkingTime  *int    `json:"a_workingtime,omitempty"`
+	KillDate     *int    `json:"a_killdate,omitempty"`
+	Impersonated *string `json:"a_impersonated,omitempty"`
+	Tags         *string `json:"a_tags,omitempty"`
+	Mark         *string `json:"a_mark,omitempty"`
+	Color        *string `json:"a_color,omitempty"`
+	InternalIP   *string `json:"a_internal_ip,omitempty"`
+	ExternalIP   *string `json:"a_external_ip,omitempty"`
+	GmtOffset    *int    `json:"a_gmt_offset,omitempty"`
+	ACP          *int    `json:"a_acp,omitempty"`
+	OemCP        *int    `json:"a_oemcp,omitempty"`
+	Pid          *string `json:"a_pid,omitempty"`
+	Tid          *string `json:"a_tid,omitempty"`
+	Arch         *string `json:"a_arch,omitempty"`
+	Elevated     *bool   `json:"a_elevated,omitempty"`
+	Process      *string `json:"a_process,omitempty"`
+	Os           *int    `json:"a_os,omitempty"`
+	OsDesc       *string `json:"a_os_desc,omitempty"`
+	Domain       *string `json:"a_domain,omitempty"`
+	Computer     *string `json:"a_computer,omitempty"`
+	Username     *string `json:"a_username,omitempty"`
+	Listener     *string `json:"a_listener,omitempty"`
 }
 
 type SyncPackerAgentTick struct {
@@ -309,6 +404,7 @@ type SyncPackerAgentTaskUpdate struct {
 
 	AgentId     string `json:"a_id"`
 	TaskId      string `json:"a_task_id"`
+	HandlerId   string `json:"a_handler_id"`
 	TaskType    int    `json:"a_task_type"`
 	FinishTime  int64  `json:"a_finish_time"`
 	MessageType int    `json:"a_msg_type"`
@@ -344,6 +440,26 @@ type SyncPackerAgentConsoleOutput struct {
 	MessageType int    `json:"a_msg_type"`
 	Message     string `json:"a_message"`
 	ClearText   string `json:"a_text"`
+}
+
+type SyncPackerAgentErrorCommand struct {
+	SpType int `json:"type"`
+
+	AgentId   string `json:"a_id"`
+	Cmdline   string `json:"a_cmdline"`
+	Message   string `json:"a_message"`
+	HookId    string `json:"ax_hook_id"`
+	HandlerId string `json:"ax_handler_id"`
+}
+
+type SyncPackerAgentLocalCommand struct {
+	SpCreateTime int64 `json:"time"`
+	SpType       int   `json:"type"`
+
+	AgentId string `json:"a_id"`
+	Cmdline string `json:"a_cmdline"`
+	Message string `json:"a_message"`
+	Text    string `json:"a_text"`
 }
 
 type SyncPackerAgentConsoleTaskSync struct {
@@ -390,6 +506,16 @@ type SyncPackerPivotDelete struct {
 	PivotId string `json:"p_pivot_id"`
 }
 
+/// CHAT
+
+type SyncPackerChatMessage struct {
+	SpType int `json:"type"`
+
+	Username string `json:"c_username"`
+	Message  string `json:"c_message"`
+	Date     int64  `json:"c_date"`
+}
+
 /// DOWNLOAD
 
 type SyncPackerDownloadCreate struct {
@@ -416,7 +542,22 @@ type SyncPackerDownloadUpdate struct {
 type SyncPackerDownloadDelete struct {
 	SpType int `json:"type"`
 
-	FileId string `json:"d_file_id"`
+	FileId []string `json:"d_files_id"`
+}
+
+type SyncPackerDownloadActual struct {
+	SpType int `json:"type"`
+
+	FileId    string `json:"d_file_id"`
+	AgentId   string `json:"d_agent_id"`
+	AgentName string `json:"d_agent_name"`
+	User      string `json:"d_user"`
+	Computer  string `json:"d_computer"`
+	File      string `json:"d_file"`
+	Size      int    `json:"d_size"`
+	Date      int64  `json:"d_date"`
+	RecvSize  int    `json:"d_recv_size"`
+	State     int    `json:"d_state"`
 }
 
 /// SCREEN
@@ -495,17 +636,17 @@ type SyncPackerCredentialsTag struct {
 /// TARGETS
 
 type SyncPackerTarget struct {
-	TargetId string `json:"t_target_id"`
-	Computer string `json:"t_computer"`
-	Domain   string `json:"t_domain"`
-	Address  string `json:"t_address"`
-	Os       int    `json:"t_os"`
-	OsDesk   string `json:"t_os_desk"`
-	Tag      string `json:"t_tag"`
-	Info     string `json:"t_info"`
-	Date     int64  `json:"t_date"`
-	Alive    bool   `json:"t_alive"`
-	Owned    bool   `json:"t_owned"`
+	TargetId string   `json:"t_target_id"`
+	Computer string   `json:"t_computer"`
+	Domain   string   `json:"t_domain"`
+	Address  string   `json:"t_address"`
+	Os       int      `json:"t_os"`
+	OsDesk   string   `json:"t_os_desk"`
+	Tag      string   `json:"t_tag"`
+	Info     string   `json:"t_info"`
+	Date     int64    `json:"t_date"`
+	Alive    bool     `json:"t_alive"`
+	Agents   []string `json:"t_agents"`
 }
 
 type SyncPackerTargetsAdd struct {
@@ -517,17 +658,17 @@ type SyncPackerTargetsAdd struct {
 type SyncPackerTargetUpdate struct {
 	SpType int `json:"type"`
 
-	TargetId string `json:"t_target_id"`
-	Computer string `json:"t_computer"`
-	Domain   string `json:"t_domain"`
-	Address  string `json:"t_address"`
-	Os       int    `json:"t_os"`
-	OsDesk   string `json:"t_os_desk"`
-	Tag      string `json:"t_tag"`
-	Info     string `json:"t_info"`
-	Date     int64  `json:"t_date"`
-	Alive    bool   `json:"t_alive"`
-	Owned    bool   `json:"t_owned"`
+	TargetId string   `json:"t_target_id"`
+	Computer string   `json:"t_computer"`
+	Domain   string   `json:"t_domain"`
+	Address  string   `json:"t_address"`
+	Os       int      `json:"t_os"`
+	OsDesk   string   `json:"t_os_desk"`
+	Tag      string   `json:"t_tag"`
+	Info     string   `json:"t_info"`
+	Date     int64    `json:"t_date"`
+	Alive    bool     `json:"t_alive"`
+	Agents   []string `json:"t_agents"`
 }
 
 type SyncPackerTargetDelete struct {

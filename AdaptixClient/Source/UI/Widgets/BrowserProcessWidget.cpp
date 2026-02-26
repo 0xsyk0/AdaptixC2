@@ -2,9 +2,13 @@
 #include <UI/Widgets/BrowserProcessWidget.h>
 #include <UI/Widgets/ConsoleWidget.h>
 #include <UI/Widgets/AdaptixWidget.h>
+#include <UI/Widgets/DockWidgetRegister.h>
+#include <Client/AuthProfile.h>
 #include <Client/AxScript/AxScriptManager.h>
 
-BrowserProcessWidget::BrowserProcessWidget(Agent* a)
+REGISTER_DOCK_WIDGET(BrowserProcessWidget, "Browser Process", false)
+
+BrowserProcessWidget::BrowserProcessWidget(const AdaptixWidget* w, Agent* a) : DockTab(QString("Processes [%1]").arg(a->data.Id), w->GetProfile()->GetProject())
 {
     agent = a;
     this->createUI();
@@ -14,6 +18,8 @@ BrowserProcessWidget::BrowserProcessWidget(Agent* a)
     connect(tableWidget,       &QTableWidget::customContextMenuRequested, this, &BrowserProcessWidget::handleTableMenu );
     connect(tableWidget,       &QTableWidget::clicked, this, &BrowserProcessWidget::onTableSelect );
     connect(treeBrowserWidget, &QTreeWidget::clicked,  this, &BrowserProcessWidget::onTreeSelect );
+
+    this->dockWidget->setWidget(this);
 }
 
 BrowserProcessWidget::~BrowserProcessWidget() = default;
@@ -126,7 +132,7 @@ void BrowserProcessWidget::SetProcess(int msgType, const QString &data) const
 
     if (agent->data.Os == OS_WINDOWS) {
         QMap<int, BrowserProcessDataWin> processMap;
-        for ( QJsonValue value : jsonArray ) {
+        for ( const QJsonValue& value : jsonArray ) {
             QJsonObject jsonObject = value.toObject();
 
             BrowserProcessDataWin processData = {0};
@@ -144,7 +150,7 @@ void BrowserProcessWidget::SetProcess(int msgType, const QString &data) const
     }
     else {
         QMap<int, BrowserProcessDataUnix> processMap;
-        for ( QJsonValue value : jsonArray ) {
+        for ( const QJsonValue& value : jsonArray ) {
             QJsonObject jsonObject = value.toObject();
 
             BrowserProcessDataUnix processData = {0};
@@ -165,7 +171,7 @@ void BrowserProcessWidget::SetProcess(int msgType, const QString &data) const
 
 /// PRIVATE
 
-void BrowserProcessWidget::setTableProcessDataWin(QMap<int, BrowserProcessDataWin> processMap) const
+void BrowserProcessWidget::setTableProcessDataWin(const QMap<int, BrowserProcessDataWin>& processMap) const
 {
     for (int index = tableWidget->rowCount(); index > 0; index-- )
         tableWidget->removeRow(index -1 );
@@ -174,7 +180,7 @@ void BrowserProcessWidget::setTableProcessDataWin(QMap<int, BrowserProcessDataWi
     tableWidget->setSortingEnabled( false );
 
     int row = 0;
-    for (auto item : processMap) {
+    for (const auto& item : processMap) {
         auto item_Pid = new QTableWidgetItem( QString::number(item.pid) );
         item_Pid->setTextAlignment( Qt::AlignCenter );
         item_Pid->setFlags(item_Pid->flags() ^ Qt::ItemIsEditable);
@@ -227,7 +233,7 @@ void BrowserProcessWidget::setTableProcessDataWin(QMap<int, BrowserProcessDataWi
     tableWidget->setSortingEnabled( true );
 }
 
-void BrowserProcessWidget::setTableProcessDataUnix(QMap<int, BrowserProcessDataUnix> processMap) const
+void BrowserProcessWidget::setTableProcessDataUnix(const QMap<int, BrowserProcessDataUnix>& processMap) const
 {
     for (int index = tableWidget->rowCount(); index > 0; index-- )
         tableWidget->removeRow(index -1 );
@@ -236,7 +242,7 @@ void BrowserProcessWidget::setTableProcessDataUnix(QMap<int, BrowserProcessDataU
     tableWidget->setSortingEnabled( false );
 
     int row = 0;
-    for (auto item : processMap) {
+    for (const auto& item : processMap) {
         auto item_Pid = new QTableWidgetItem( QString::number(item.pid) );
         item_Pid->setTextAlignment( Qt::AlignCenter );
         item_Pid->setFlags(item_Pid->flags() ^ Qt::ItemIsEditable);
@@ -425,7 +431,7 @@ void BrowserProcessWidget::filterTableWidget(const QString &filterText) const
 void BrowserProcessWidget::onReload() const
 {
     statusLabel->setText("");
-    emit agent->adaptixWidget->eventProcessBrowserList(agent->data.Id);
+    Q_EMIT agent->adaptixWidget->eventProcessBrowserList(agent->data.Id);
 }
 
 void BrowserProcessWidget::onFilter(const QString &text) const

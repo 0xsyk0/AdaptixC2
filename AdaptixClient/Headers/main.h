@@ -67,7 +67,8 @@
 #include <Utils/FileSystem.h>
 #include <Utils/Convert.h>
 
-#define FRAMEWORK_VERSION "Adaptix Framework v0.8"
+#define FRAMEWORK_VERSION "Adaptix Framework v1.1"
+#define SMALL_VERSION     "v1.1"
 
 ///////////
 
@@ -91,7 +92,14 @@
 #define TYPE_SYNC_START  0x11
 #define TYPE_SYNC_FINISH 0x12
 
-#define SP_TYPE_EVENT  0x13
+#define SP_TYPE_EVENT            0x13
+#define TYPE_SYNC_BATCH          0x14
+#define TYPE_SYNC_CATEGORY_BATCH 0x15
+
+#define TYPE_CHAT_MESSAGE 0x18
+
+#define TYPE_SERVICE_REG  0x21
+#define TYPE_SERVICE_DATA 0x22
 
 #define TYPE_LISTENER_REG   0x31
 #define TYPE_LISTENER_START 0x32
@@ -114,6 +122,7 @@
 #define TYPE_DOWNLOAD_CREATE 0x51
 #define TYPE_DOWNLOAD_UPDATE 0x52
 #define TYPE_DOWNLOAD_DELETE 0x53
+#define TYPE_DOWNLOAD_ACTUAL 0x54
 
 #define TYPE_TUNNEL_CREATE 0x57
 #define TYPE_TUNNEL_EDIT   0x58
@@ -128,6 +137,8 @@
 #define TYPE_BROWSER_STATUS  0x63
 #define TYPE_BROWSER_PROCESS 0x64
 
+#define TYPE_AGENT_CONSOLE_LOCAL     0x67
+#define TYPE_AGENT_CONSOLE_ERROR     0x68
 #define TYPE_AGENT_CONSOLE_OUT       0x69
 #define TYPE_AGENT_CONSOLE_TASK_SYNC 0x6a
 #define TYPE_AGENT_CONSOLE_TASK_UPD  0x6b
@@ -174,6 +185,10 @@
 
 //////////
 
+class AxContainerWrapper;
+
+//////////
+
 typedef struct SettingsData {
     QString MainTheme;
     QString FontFamily;
@@ -186,13 +201,27 @@ typedef struct SettingsData {
     bool ConsoleNoWrap;
     bool ConsoleAutoScroll;
 
-    bool   SessionsTableColumns[15];
+    bool   SessionsTableColumns[16];
+    int    SessionsColumnOrder[16];
     bool   CheckHealth;
     double HealthCoaf;
     int    HealthOffset;
 
     bool TasksTableColumns[11];
+
+    bool TabBlinkEnabled;
+    QMap<QString, bool> BlinkWidgets;  // className -> enabled
 } SettingsData;
+
+typedef struct AxUI
+{
+    AxContainerWrapper* container;
+    QWidget*            widget;
+    int                 height;
+    int                 width;
+} AxUI;
+
+/// Object Data
 
 typedef struct ListenerData
 {
@@ -203,38 +232,44 @@ typedef struct ListenerData
     QString BindHost;
     QString BindPort;
     QString AgentAddresses;
+    QString Date;
+    qint64  DateTimestamp = 0;
     QString Status;
     QString Data;
 } ListenerData;
 
 typedef struct AgentData
 {
-    QString     Id;
-    QString     Name;
-    QString     Listener;
-    bool        Async;
-    QString     ExternalIP;
-    QString     InternalIP;
-    int         GmtOffset;
-    uint        KillDate;
-    uint        WorkingTime;
-    int         Sleep;
-    int         Jitter;
-    QString     Pid;
-    QString     Tid;
-    QString     Arch;
-    bool        Elevated;
-    QString     Process;
-    int         Os;
-    QString     OsDesc;
-    QString     Domain;
-    QString     Computer;
-    QString     Username;
-    QString     Impersonated;
-    QString     Tags;
-    QString     Mark;
-    QString     Color;
-    int         LastTick;
+    QString Id;
+    QString Name;
+    QString Listener;
+    bool    Async;
+    QString ExternalIP;
+    QString InternalIP;
+    int     GmtOffset;
+    int     ACP;
+    int     OemCP;
+    uint    KillDate;
+    uint    WorkingTime;
+    int     Sleep;
+    int     Jitter;
+    QString Pid;
+    QString Tid;
+    QString Arch;
+    bool    Elevated;
+    QString Process;
+    int     Os;
+    QString OsDesc;
+    QString Domain;
+    QString Computer;
+    QString Username;
+    QString Impersonated;
+    QString Tags;
+    QString Mark;
+    QString Color;
+    int     LastTick;
+    QString Date;
+    qint64  DateTimestamp = 0;
 } AgentData;
 
 typedef struct DownloadData
@@ -249,6 +284,7 @@ typedef struct DownloadData
     int     RecvSize;
     int     State;
     QString Date;
+    qint64  DateTimestamp = 0;
 } DownloadData;
 
 typedef struct ScreenData
@@ -257,6 +293,7 @@ typedef struct ScreenData
     QString    User;
     QString    Computer;
     QString    Date;
+    qint64     DateTimestamp = 0;
     QString    Note;
     QByteArray Content;
 } ScreenData;
@@ -270,6 +307,7 @@ typedef struct CredentialData
     QString Type;
     QString Tag;
     QString Date;
+    qint64  DateTimestamp = 0;
     QString Storage;
     QString AgentId;
     QString Host;
@@ -277,17 +315,19 @@ typedef struct CredentialData
 
 typedef struct TargetData
 {
-    QString TargetId;
-    QString Computer;
-    QString Domain;
-    QString Address;
-    QString Tag;
-    int     Os;
-    QString OsDesc;
-    QString Date;
-    QString Info;
-    bool    Alive;
-    bool    Owned;
+    QString     TargetId;
+    QString     Computer;
+    QString     Domain;
+    QString     Address;
+    QString     Tag;
+    QIcon       OsIcon;
+    int         Os;
+    QString     OsDesc;
+    QString     Date;
+    qint64      DateTimestamp = 0;
+    QString     Info;
+    bool        Alive;
+    QStringList Agents;
 } TargetData;
 
 typedef struct TunnelData

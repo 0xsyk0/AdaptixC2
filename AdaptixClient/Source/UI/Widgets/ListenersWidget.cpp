@@ -1,5 +1,6 @@
 #include <QJSEngine>
 #include <UI/Widgets/ListenersWidget.h>
+#include <UI/Widgets/DockWidgetRegister.h>
 #include <UI/Dialogs/DialogListener.h>
 #include <UI/Dialogs/DialogAgent.h>
 #include <UI/Widgets/AdaptixWidget.h>
@@ -7,131 +8,129 @@
 #include <Client/AxScript/AxElementWrappers.h>
 #include <Client/AxScript/AxScriptManager.h>
 
-ListenersWidget::ListenersWidget(AdaptixWidget* w) : adaptixWidget(w)
+REGISTER_DOCK_WIDGET(ListenersWidget, "Listeners", true)
+
+ListenersWidget::ListenersWidget(AdaptixWidget* w) : DockTab("Listeners", w->GetProfile()->GetProject(), ":/icons/listeners"), adaptixWidget(w)
 {
     this->createUI();
 
-    connect(tableWidget, &QTableWidget::customContextMenuRequested, this, &ListenersWidget::handleListenersMenu);
+    connect(tableView, &QTableView::doubleClicked,              this, &ListenersWidget::onEditListener);
+    connect(tableView, &QTableView::customContextMenuRequested, this, &ListenersWidget::handleListenersMenu);
+    connect(tableView->selectionModel(), &QItemSelectionModel::selectionChanged, this, [this](const QItemSelection &selected, const QItemSelection &deselected){
+            Q_UNUSED(selected)
+            Q_UNUSED(deselected)
+            tableView->setFocus();
+    });
+    connect(inputFilter, &QLineEdit::textChanged,   this, &ListenersWidget::onFilterUpdate);
+    connect(inputFilter, &QLineEdit::returnPressed, this, [this]() { proxyModel->setTextFilter(inputFilter->text()); });
+    connect(hideButton,  &ClickableLabel::clicked,  this, &ListenersWidget::toggleSearchPanel);
+
+    shortcutSearch = new QShortcut(QKeySequence("Ctrl+F"), this);
+    shortcutSearch->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(shortcutSearch, &QShortcut::activated, this, &ListenersWidget::toggleSearchPanel);
+
+    auto shortcutEsc = new QShortcut(QKeySequence(Qt::Key_Escape), inputFilter);
+    shortcutEsc->setContext(Qt::WidgetShortcut);
+    connect(shortcutEsc, &QShortcut::activated, this, [this]() { searchWidget->setVisible(false); });
+
+    this->dockWidget->setWidget(this);
 }
 
 ListenersWidget::~ListenersWidget() = default;
 
+void ListenersWidget::SetUpdatesEnabled(const bool enabled)
+{
+    tableView->setUpdatesEnabled(enabled);
+}
+
 void ListenersWidget::createUI()
 {
-    tableWidget = new QTableWidget( this );
-    tableWidget->setColumnCount( 8 );
-    tableWidget->setContextMenuPolicy( Qt::CustomContextMenu );
-    tableWidget->setAutoFillBackground( false );
-    tableWidget->setShowGrid( false );
-    tableWidget->setSortingEnabled( true );
-    tableWidget->setWordWrap( true );
-    tableWidget->setCornerButtonEnabled( false );
-    tableWidget->setSelectionBehavior( QAbstractItemView::SelectRows );
-    tableWidget->setSelectionMode( QAbstractItemView::SingleSelection );
-    tableWidget->setFocusPolicy( Qt::NoFocus );
-    tableWidget->setAlternatingRowColors( true );
-    tableWidget->horizontalHeader()->setSectionResizeMode( QHeaderView::Stretch );
-    tableWidget->horizontalHeader()->setCascadingSectionResizes( true );
-    tableWidget->horizontalHeader()->setHighlightSections( false );
-    tableWidget->verticalHeader()->setVisible( false );
+    auto horizontalSpacer = new QSpacerItem(40, 20, QSizePolicy::Expanding, QSizePolicy::Minimum);
 
-    tableWidget->setHorizontalHeaderItem( ColumnName,     new QTableWidgetItem( "Name" ) );
-    tableWidget->setHorizontalHeaderItem( ColumnRegName,  new QTableWidgetItem( "Reg name" ) );
-    tableWidget->setHorizontalHeaderItem( ColumnType,     new QTableWidgetItem( "Type" ) );
-    tableWidget->setHorizontalHeaderItem( ColumnProtocol, new QTableWidgetItem( "Protocol" ) );
-    tableWidget->setHorizontalHeaderItem( ColumnBindHost, new QTableWidgetItem( "Bind Host" ) );
-    tableWidget->setHorizontalHeaderItem( ColumnBindPort, new QTableWidgetItem( "Bind Port" ) );
-    tableWidget->setHorizontalHeaderItem( ColumnHosts,    new QTableWidgetItem( "C2 Hosts (agent)" ) );
-    tableWidget->setHorizontalHeaderItem( ColumnStatus,   new QTableWidgetItem( "Status" ) );
+    searchWidget = new QWidget(this);
+    searchWidget->setVisible(false);
 
-    mainGridLayout = new QGridLayout( this );
-    mainGridLayout->setContentsMargins(0, 0,  0, 0);
-    mainGridLayout->addWidget(tableWidget, 0, 0, 1, 1);
+    inputFilter = new QLineEdit(searchWidget);
+    inputFilter->setPlaceholderText("filter: (http | https) & ^(test)");
+    inputFilter->setMaximumWidth(300);
+
+    autoSearchCheck = new QCheckBox("auto", searchWidget);
+    autoSearchCheck->setChecked(true);
+    autoSearchCheck->setToolTip("Auto search on text change. If unchecked, press Enter to search.");
+
+    hideButton = new ClickableLabel("  x  ");
+    hideButton->setCursor(Qt::PointingHandCursor);
+    hideButton->setStyleSheet("QLabel { color: #888; font-weight: bold; } QLabel:hover { color: #e34234; }");
+
+    searchLayout = new QHBoxLayout(searchWidget);
+    searchLayout->setContentsMargins(0, 4, 0, 0);
+    searchLayout->setSpacing(4);
+    searchLayout->addWidget(inputFilter);
+    searchLayout->addWidget(autoSearchCheck);
+    searchLayout->addSpacing(8);
+    searchLayout->addWidget(hideButton);
+    searchLayout->addSpacerItem(horizontalSpacer);
+
+    listenersModel = new ListenersTableModel(this);
+    proxyModel = new ListenersFilterProxyModel(this);
+    proxyModel->setSourceModel(listenersModel);
+    proxyModel->setFilterCaseSensitivity(Qt::CaseInsensitive);
+
+    tableView = new QTableView(this);
+    tableView->setModel(proxyModel);
+    tableView->setContextMenuPolicy(Qt::CustomContextMenu);
+    tableView->setAutoFillBackground(false);
+    tableView->setShowGrid(false);
+    tableView->setSortingEnabled(true);
+    tableView->setWordWrap(true);
+    tableView->setCornerButtonEnabled(false);
+    tableView->setSelectionBehavior(QAbstractItemView::SelectRows);
+    tableView->setSelectionMode(QAbstractItemView::SingleSelection);
+    tableView->setFocusPolicy(Qt::NoFocus);
+    tableView->setAlternatingRowColors(true);
+    tableView->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    tableView->horizontalHeader()->setCascadingSectionResizes(true);
+    tableView->horizontalHeader()->setHighlightSections(false);
+    tableView->verticalHeader()->setVisible(false);
+
+    tableView->setItemDelegate(new PaddingDelegate(tableView));
+    tableView->sortByColumn(LC_Date, Qt::DescendingOrder);
+
+    mainGridLayout = new QGridLayout(this);
+    mainGridLayout->setContentsMargins(0, 0, 0, 0);
+    mainGridLayout->addWidget(searchWidget, 0, 0, 1, 1);
+    mainGridLayout->addWidget(tableView, 1, 0, 1, 1);
 }
 
 void ListenersWidget::Clear() const
 {
     adaptixWidget->Listeners.clear();
-    for (int index = tableWidget->rowCount(); index > 0; index-- )
-        tableWidget->removeRow(index -1 );
+    listenersModel->clear();
+    inputFilter->clear();
 }
 
-void ListenersWidget::AddListenerItem(const ListenerData &newListener ) const
+void ListenersWidget::AddListenerItem(const ListenerData &newListener) const
 {
-    for( auto listener : adaptixWidget->Listeners ) {
-        if( listener.Name == newListener.Name )
-            return;
-    }
+    if (listenersModel->contains(newListener.Name))
+        return;
 
-    auto item_Name      = new QTableWidgetItem( newListener.Name );
-    auto item_RegName   = new QTableWidgetItem( newListener.ListenerRegName );
-    auto item_Type      = new QTableWidgetItem( newListener.ListenerType );
-    auto item_Protocol  = new QTableWidgetItem( newListener.ListenerProtocol );
-    auto item_BindHost  = new QTableWidgetItem( newListener.BindHost );
-    auto item_BindPort  = new QTableWidgetItem( newListener.BindPort );
-    auto item_AgentHost = new QTableWidgetItem( newListener.AgentAddresses );
-    auto item_Status    = new QTableWidgetItem( newListener.Status );
-
-    item_Name->setFlags( item_Name->flags() ^ Qt::ItemIsEditable );
-
-    item_RegName->setFlags( item_RegName->flags() ^ Qt::ItemIsEditable );
-
-    item_Type->setFlags( item_Type->flags() ^ Qt::ItemIsEditable );
-    item_Type->setTextAlignment( Qt::AlignCenter );
-
-    item_Protocol->setFlags( item_Protocol->flags() ^ Qt::ItemIsEditable );
-    item_Protocol->setTextAlignment( Qt::AlignCenter );
-
-    item_BindHost->setFlags( item_BindHost->flags() ^ Qt::ItemIsEditable );
-    item_BindHost->setTextAlignment( Qt::AlignCenter );
-
-    item_BindPort->setFlags( item_BindPort->flags() ^ Qt::ItemIsEditable );
-    item_BindPort->setTextAlignment( Qt::AlignCenter );
-
-    item_AgentHost->setFlags( item_AgentHost->flags() ^ Qt::ItemIsEditable );
-    item_AgentHost->setTextAlignment( Qt::AlignLeft | Qt::AlignVCenter );
-
-    item_Status->setFlags( item_Status->flags() ^ Qt::ItemIsEditable );
-    item_Status->setTextAlignment( Qt::AlignCenter );
-    if ( newListener.Status == "Listen"  )
-        item_Status->setForeground(QColor(COLOR_NeonGreen));
-    else
-        item_Status->setForeground( QColor( COLOR_ChiliPepper ) );
-
-    if( tableWidget->rowCount() < 1 )
-        tableWidget->setRowCount( 1 );
-    else
-        tableWidget->setRowCount( tableWidget->rowCount() + 1 );
-
-    bool isSortingEnabled = tableWidget->isSortingEnabled();
-    tableWidget->setSortingEnabled( false );
-    tableWidget->setItem( tableWidget->rowCount() - 1, ColumnName,     item_Name );
-    tableWidget->setItem( tableWidget->rowCount() - 1, ColumnRegName,  item_RegName );
-    tableWidget->setItem( tableWidget->rowCount() - 1, ColumnType,     item_Type );
-    tableWidget->setItem( tableWidget->rowCount() - 1, ColumnProtocol, item_Protocol );
-    tableWidget->setItem( tableWidget->rowCount() - 1, ColumnBindHost, item_BindHost );
-    tableWidget->setItem( tableWidget->rowCount() - 1, ColumnBindPort, item_BindPort );
-    tableWidget->setItem( tableWidget->rowCount() - 1, ColumnHosts,    item_AgentHost );
-    tableWidget->setItem( tableWidget->rowCount() - 1, ColumnStatus,   item_Status );
-    tableWidget->setSortingEnabled( isSortingEnabled );
-
-    tableWidget->horizontalHeader()->setSectionResizeMode( ColumnName,     QHeaderView::ResizeToContents );
-    tableWidget->horizontalHeader()->setSectionResizeMode( ColumnRegName,  QHeaderView::ResizeToContents );
-    tableWidget->horizontalHeader()->setSectionResizeMode( ColumnType,     QHeaderView::ResizeToContents );
-    tableWidget->horizontalHeader()->setSectionResizeMode( ColumnProtocol, QHeaderView::ResizeToContents );
-    tableWidget->horizontalHeader()->setSectionResizeMode( ColumnBindHost, QHeaderView::ResizeToContents );
-    tableWidget->horizontalHeader()->setSectionResizeMode( ColumnBindPort, QHeaderView::ResizeToContents );
-    tableWidget->horizontalHeader()->setSectionResizeMode( ColumnStatus,   QHeaderView::ResizeToContents );
-
-    tableWidget->verticalHeader()->setSectionResizeMode(tableWidget->rowCount() - 1, QHeaderView::ResizeToContents);
-
+    listenersModel->add(newListener);
     adaptixWidget->Listeners.push_back(newListener);
+
+    tableView->horizontalHeader()->setSectionResizeMode(LC_Name,     QHeaderView::ResizeToContents);
+    tableView->horizontalHeader()->setSectionResizeMode(LC_RegName,  QHeaderView::ResizeToContents);
+    tableView->horizontalHeader()->setSectionResizeMode(LC_Type,     QHeaderView::ResizeToContents);
+    tableView->horizontalHeader()->setSectionResizeMode(LC_Protocol, QHeaderView::ResizeToContents);
+    tableView->horizontalHeader()->setSectionResizeMode(LC_BindHost, QHeaderView::ResizeToContents);
+    tableView->horizontalHeader()->setSectionResizeMode(LC_BindPort, QHeaderView::ResizeToContents);
+    tableView->horizontalHeader()->setSectionResizeMode(LC_Date,     QHeaderView::ResizeToContents);
+    tableView->horizontalHeader()->setSectionResizeMode(LC_Status,   QHeaderView::ResizeToContents);
 }
 
 void ListenersWidget::EditListenerItem(const ListenerData &newListener) const
 {
-    for ( int i = 0; i < adaptixWidget->Listeners.size(); i++ ) {
-        if( adaptixWidget->Listeners[i].Name == newListener.Name ) {
+    for (int i = 0; i < adaptixWidget->Listeners.size(); i++) {
+        if (adaptixWidget->Listeners[i].Name == newListener.Name) {
             adaptixWidget->Listeners[i].BindHost = newListener.BindHost;
             adaptixWidget->Listeners[i].BindPort = newListener.BindPort;
             adaptixWidget->Listeners[i].AgentAddresses = newListener.AgentAddresses;
@@ -141,62 +140,62 @@ void ListenersWidget::EditListenerItem(const ListenerData &newListener) const
         }
     }
 
-    for (int row = 0; row < tableWidget->rowCount(); ++row) {
-        QTableWidgetItem *item = tableWidget->item(row, ColumnName);
-        if ( item && item->text() == newListener.Name ) {
-            tableWidget->item(row, ColumnBindHost)->setText(newListener.BindHost);
-            tableWidget->item(row, ColumnBindPort)->setText(newListener.BindPort);
-            tableWidget->item(row, ColumnHosts)->setText(newListener.AgentAddresses);
-            tableWidget->item(row, ColumnStatus)->setText(newListener.Status);
-
-            if ( newListener.Status == "Listen"  )
-                tableWidget->item(row, ColumnStatus)->setForeground(QColor(COLOR_NeonGreen) );
-            else
-                tableWidget->item(row, ColumnStatus)->setForeground( QColor(COLOR_ChiliPepper) );
-            break;
-        }
-    }
+    listenersModel->update(newListener.Name, newListener);
 }
 
 void ListenersWidget::RemoveListenerItem(const QString &listenerName) const
 {
-    for ( int i = 0; i < adaptixWidget->Listeners.size(); i++ ) {
-        if( adaptixWidget->Listeners[i].Name == listenerName ) {
-            adaptixWidget->Listeners.erase( adaptixWidget->Listeners.begin() + i );
+    for (int i = 0; i < adaptixWidget->Listeners.size(); i++) {
+        if (adaptixWidget->Listeners[i].Name == listenerName) {
+            adaptixWidget->Listeners.erase(adaptixWidget->Listeners.begin() + i);
             break;
         }
     }
 
-    for (int row = 0; row < tableWidget->rowCount(); ++row) {
-        QTableWidgetItem *item = tableWidget->item(row, ColumnName);
-        if ( item && item->text() == listenerName ) {
-            tableWidget->removeRow(row);
-            break;
-        }
-    }
+    listenersModel->remove(listenerName);
 }
 
 /// Slots
 
-void ListenersWidget::handleListenersMenu(const QPoint &pos ) const
+void ListenersWidget::toggleSearchPanel() const
+{
+    if (searchWidget->isVisible()) {
+        searchWidget->setVisible(false);
+    } else {
+        searchWidget->setVisible(true);
+        inputFilter->setFocus();
+    }
+}
+
+void ListenersWidget::onFilterUpdate() const
+{
+    if (autoSearchCheck->isChecked()) {
+        proxyModel->setTextFilter(inputFilter->text());
+    }
+    inputFilter->setFocus();
+}
+
+void ListenersWidget::handleListenersMenu(const QPoint &pos) const
 {
     QMenu listenerMenu = QMenu();
 
-    listenerMenu.addAction("Create", this, &ListenersWidget::onCreateListener );
-    listenerMenu.addAction("Edit",   this, &ListenersWidget::onEditListener );
-    listenerMenu.addAction("Remove", this, &ListenersWidget::onRemoveListener );
+    listenerMenu.addAction("Create", this, &ListenersWidget::onCreateListener);
+    listenerMenu.addAction("Edit",   this, &ListenersWidget::onEditListener);
+    listenerMenu.addAction("Remove", this, &ListenersWidget::onRemoveListener);
     listenerMenu.addSeparator();
-    listenerMenu.addAction("Generate agent", this, &ListenersWidget::onGenerateAgent );
+    listenerMenu.addAction("Pause",  this, &ListenersWidget::onPauseListener);
+    listenerMenu.addAction("Resume", this, &ListenersWidget::onResumeListener);
+    listenerMenu.addSeparator();
+    listenerMenu.addAction("Generate agent", this, &ListenersWidget::onGenerateAgent);
 
-    QPoint globalPos = tableWidget->mapToGlobal(pos);
+    QPoint globalPos = tableView->mapToGlobal(pos);
     listenerMenu.exec(globalPos);
 }
 
 void ListenersWidget::onCreateListener() const
 {
     QList<RegListenerConfig> listeners;
-    QMap<QString, QWidget*> widgets;
-    QMap<QString, AxContainerWrapper*> containers;
+    QMap<QString, AxUI> ax_uis;
 
     auto listenersList = adaptixWidget->ScriptManager->ListenerScriptList();
 
@@ -228,10 +227,12 @@ void ListenersWidget::onCreateListener() const
         }
 
         QJSValue ui_container = result.property("ui_container");
-        QJSValue ui_panel = result.property("ui_panel");
+        QJSValue ui_panel     = result.property("ui_panel");
+        QJSValue ui_height    = result.property("ui_height");
+        QJSValue ui_width     = result.property("ui_width");
+
         if ( ui_container.isUndefined() || !ui_container.isObject() || ui_panel.isUndefined() || !ui_panel.isQObject()) {
             adaptixWidget->ScriptManager->consolePrintError(listener + " - function ListenerUI must return panel and container objects");
-
             continue;
         }
 
@@ -249,27 +250,41 @@ void ListenersWidget::onCreateListener() const
             continue;
         }
 
+        int h = 650;
+        if (ui_height.isNumber() && ui_height.toInt() > 0) {
+            h = ui_height.toInt();
+        }
+
+        int w = 650;
+        if (ui_width.isNumber() && ui_width.toInt() > 0) {
+            w = ui_width.toInt();
+        }
+
         auto regListener = adaptixWidget->GetRegListener(listener);
 
         listeners.append(regListener);
-        widgets[listener] = formElement->widget();
-        containers[listener] = container;
+        ax_uis[listener] = { container, formElement->widget(), h, w };
     }
 
     DialogListener* dialogListener = new DialogListener();
     dialogListener->setAttribute(Qt::WA_DeleteOnClose);
     dialogListener->SetProfile( *(adaptixWidget->GetProfile()) );
-    dialogListener->AddExListeners(listeners, widgets, containers);
+    dialogListener->AddExListeners(listeners, ax_uis);
     dialogListener->Start();
 }
 
 void ListenersWidget::onEditListener() const
 {
-    if (tableWidget->selectionModel()->selectedRows().empty())
+    if (tableView->selectionModel()->selectedRows().empty())
         return;
 
-    auto listenerName    = tableWidget->item( tableWidget->currentRow(), ColumnName )->text();
-    auto listenerRegName = tableWidget->item( tableWidget->currentRow(), ColumnRegName )->text();
+    QModelIndex currentIndex = tableView->currentIndex();
+    QModelIndex sourceIndex = proxyModel->mapToSource(currentIndex);
+    if (!sourceIndex.isValid())
+        return;
+
+    auto listenerName    = listenersModel->data(listenersModel->index(sourceIndex.row(), LC_Name), Qt::DisplayRole).toString();
+    auto listenerRegName = listenersModel->data(listenersModel->index(sourceIndex.row(), LC_RegName), Qt::DisplayRole).toString();
 
     QString listenerData = "";
     for (auto listener : adaptixWidget->Listeners) {
@@ -280,8 +295,7 @@ void ListenersWidget::onEditListener() const
     }
 
     QList<RegListenerConfig> listeners;
-    QMap<QString, QWidget*>  widgets;
-    QMap<QString, AxContainerWrapper*> containers;
+    QMap<QString, AxUI> ax_uis;
 
     auto engine = adaptixWidget->ScriptManager->ListenerScriptEngine(listenerRegName);
     if (engine == nullptr) {
@@ -310,7 +324,10 @@ void ListenersWidget::onEditListener() const
     }
 
     QJSValue ui_container = result.property("ui_container");
-    QJSValue ui_panel = result.property("ui_panel");
+    QJSValue ui_panel     = result.property("ui_panel");
+    QJSValue ui_height    = result.property("ui_height");
+    QJSValue ui_width     = result.property("ui_width");
+
     if ( ui_container.isUndefined() || !ui_container.isObject() || ui_panel.isUndefined() || !ui_panel.isQObject()) {
         adaptixWidget->ScriptManager->consolePrintError(listenerName + " - function ListenerUI must return panel and container objects");
         return;
@@ -330,9 +347,18 @@ void ListenersWidget::onEditListener() const
         return;
     }
 
+    int h = 650;
+    if (ui_height.isNumber() && ui_height.toInt() > 0) {
+        h = ui_height.toInt();
+    }
+
+    int w = 650;
+    if (ui_width.isNumber() && ui_width.toInt() > 0) {
+        w = ui_width.toInt();
+    }
+
     listeners.append(adaptixWidget->GetRegListener(listenerRegName));
-    widgets[listenerRegName] = formElement->widget();
-    containers[listenerRegName] = container;
+    ax_uis[listenerRegName] = { container, formElement->widget(), h, w };
 
     container->fromJson(listenerData);
 
@@ -340,44 +366,91 @@ void ListenersWidget::onEditListener() const
     dialogListener->setAttribute(Qt::WA_DeleteOnClose);
     dialogListener->SetEditMode(listenerName);
     dialogListener->SetProfile( *(adaptixWidget->GetProfile()) );
-    dialogListener->AddExListeners(listeners, widgets, containers);
+    dialogListener->AddExListeners(listeners, ax_uis);
     dialogListener->Start();
 }
 
 void ListenersWidget::onRemoveListener() const
 {
-    if (tableWidget->selectionModel()->selectedRows().empty())
+    if (tableView->selectionModel()->selectedRows().empty())
         return;
 
-    auto listenerName    = tableWidget->item( tableWidget->currentRow(), ColumnName )->text();
-    auto listenerRegName = tableWidget->item( tableWidget->currentRow(), ColumnRegName )->text();
-
-    QString message = QString();
-    bool ok = false;
-    bool result = HttpReqListenerStop( listenerName, listenerRegName, *(adaptixWidget->GetProfile()), &message, &ok );
-    if( !result ){
-        MessageError("Response timeout");
+    QModelIndex currentIndex = tableView->currentIndex();
+    QModelIndex sourceIndex = proxyModel->mapToSource(currentIndex);
+    if (!sourceIndex.isValid())
         return;
-    }
 
-    if ( !ok ) {
-        MessageError(message);
-    }
+    auto listenerName    = listenersModel->data(listenersModel->index(sourceIndex.row(), LC_Name), Qt::DisplayRole).toString();
+    auto listenerRegName = listenersModel->data(listenersModel->index(sourceIndex.row(), LC_RegName), Qt::DisplayRole).toString();
+
+    QMessageBox::StandardButton reply = QMessageBox::question(nullptr, "Delete Confirmation",
+                                      QString("Are you sure you want to remove the '%1' listener?").arg(listenerName),
+                                      QMessageBox::Yes | QMessageBox::No,
+                                      QMessageBox::No);
+    if (reply != QMessageBox::Yes)
+        return;
+
+    HttpReqListenerStopAsync(listenerName, listenerRegName, *(adaptixWidget->GetProfile()), [](bool success, const QString& message, const QJsonObject&) {
+        if (!success)
+            MessageError(message.isEmpty() ? "Response timeout" : message);
+    });
+}
+
+void ListenersWidget::onPauseListener() const
+{
+    if (tableView->selectionModel()->selectedRows().empty())
+        return;
+
+    QModelIndex currentIndex = tableView->currentIndex();
+    QModelIndex sourceIndex = proxyModel->mapToSource(currentIndex);
+    if (!sourceIndex.isValid())
+        return;
+
+    auto listenerName    = listenersModel->data(listenersModel->index(sourceIndex.row(), LC_Name), Qt::DisplayRole).toString();
+    auto listenerRegName = listenersModel->data(listenersModel->index(sourceIndex.row(), LC_RegName), Qt::DisplayRole).toString();
+
+    HttpReqListenerPauseAsync(listenerName, listenerRegName, *(adaptixWidget->GetProfile()), [](bool success, const QString& message, const QJsonObject&) {
+        if (!success)
+            MessageError(message.isEmpty() ? "Response timeout" : message);
+    });
+}
+
+void ListenersWidget::onResumeListener() const
+{
+    if (tableView->selectionModel()->selectedRows().empty())
+        return;
+
+    QModelIndex currentIndex = tableView->currentIndex();
+    QModelIndex sourceIndex = proxyModel->mapToSource(currentIndex);
+    if (!sourceIndex.isValid())
+        return;
+
+    auto listenerName    = listenersModel->data(listenersModel->index(sourceIndex.row(), LC_Name), Qt::DisplayRole).toString();
+    auto listenerRegName = listenersModel->data(listenersModel->index(sourceIndex.row(), LC_RegName), Qt::DisplayRole).toString();
+
+    HttpReqListenerResumeAsync(listenerName, listenerRegName, *(adaptixWidget->GetProfile()), [](bool success, const QString& message, const QJsonObject&) {
+        if (!success)
+            MessageError(message.isEmpty() ? "Response timeout" : message);
+    });
 }
 
 void ListenersWidget::onGenerateAgent() const
 {
-    if (tableWidget->selectionModel()->selectedRows().empty())
+    if (tableView->selectionModel()->selectedRows().empty())
         return;
 
-    auto listenerName     = tableWidget->item( tableWidget->currentRow(), ColumnName )->text();
-    auto listenerRegName  = tableWidget->item( tableWidget->currentRow(), ColumnRegName )->text();
+    QModelIndex currentIndex = tableView->currentIndex();
+    QModelIndex sourceIndex = proxyModel->mapToSource(currentIndex);
+    if (!sourceIndex.isValid())
+        return;
+
+    auto listenerName    = listenersModel->data(listenersModel->index(sourceIndex.row(), LC_Name), Qt::DisplayRole).toString();
+    auto listenerRegName = listenersModel->data(listenersModel->index(sourceIndex.row(), LC_RegName), Qt::DisplayRole).toString();
 
     QList<QString> agentNames = adaptixWidget->GetAgentNames(listenerRegName);
 
     QStringList agents;
-    QMap<QString, QWidget*> widgets;
-    QMap<QString, AxContainerWrapper*> containers;
+    QMap<QString, AxUI> ax_uis;
 
     for (auto agent : agentNames) {
         auto engine = adaptixWidget->ScriptManager->AgentScriptEngine(agent);
@@ -392,8 +465,11 @@ void ListenersWidget::onGenerateAgent() const
             return;
         }
 
+        QJSValue jsListeners = engine->newArray(1);
+        jsListeners.setProperty(0, listenerRegName);
+
         QJSValueList args;
-        args << QJSValue(listenerRegName);
+        args << jsListeners;
         QJSValue result = func.call(args);
         if (result.isError()) {
             QString error = QStringLiteral("%1\n  at line %2 in %3\n  stack: %4").arg(result.toString()).arg(result.property("lineNumber").toInt()).arg(listenerName).arg(result.property("stack").toString());
@@ -407,7 +483,10 @@ void ListenersWidget::onGenerateAgent() const
         }
 
         QJSValue ui_container = result.property("ui_container");
-        QJSValue ui_panel = result.property("ui_panel");
+        QJSValue ui_panel     = result.property("ui_panel");
+        QJSValue ui_height    = result.property("ui_height");
+        QJSValue ui_width     = result.property("ui_width");
+
         if ( ui_container.isUndefined() || !ui_container.isObject() || ui_panel.isUndefined() || !ui_panel.isQObject()) {
             adaptixWidget->ScriptManager->consolePrintError(listenerName + " - function GenerateUI must return panel and container objects");
             return;
@@ -427,14 +506,30 @@ void ListenersWidget::onGenerateAgent() const
             return;
         }
 
+        int h = 550;
+        if (ui_height.isNumber() && ui_height.toInt() > 0) {
+            h = ui_height.toInt();
+        }
+
+        int w = 550;
+        if (ui_width.isNumber() && ui_width.toInt() > 0) {
+            w = ui_width.toInt();
+        }
+
         agents.append(agent);
-        widgets[agent] = formElement->widget();
-        containers[agent] = container;
+        ax_uis[agent] = { container, formElement->widget(), h, w };
     }
 
-    DialogAgent* dialogListener = new DialogAgent(listenerName, listenerRegName);
+    QMap<QString, AgentTypeInfo> agentTypesMap;
+    for (const auto &agentItem : agents) {
+        agentTypesMap[agentItem] = adaptixWidget->GetAgentTypeInfo(agentItem);
+    }
+
+    DialogAgent* dialogListener = new DialogAgent(adaptixWidget, listenerName, listenerRegName);
     dialogListener->setAttribute(Qt::WA_DeleteOnClose);
     dialogListener->SetProfile( *(adaptixWidget->GetProfile()) );
-    dialogListener->AddExAgents(agents, widgets, containers);
+    dialogListener->SetAvailableListeners(adaptixWidget->Listeners);
+    dialogListener->SetAgentTypes(agentTypesMap);
+    dialogListener->AddExAgents(agents, ax_uis);
     dialogListener->Start();
 }

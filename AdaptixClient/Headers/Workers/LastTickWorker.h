@@ -17,8 +17,12 @@ public:
 
     void run() override;
 
-public slots:
-    void updateLastItems() const;
+Q_SIGNALS:
+    void agentsUpdated(const QStringList& agentIds);
+
+public Q_SLOTS:
+    void updateLastItems();
+    void stopWorker();
 };
 
 #endif

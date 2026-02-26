@@ -1,13 +1,17 @@
 #include <Agent/Agent.h>
 #include <UI/Widgets/AdaptixWidget.h>
 #include <UI/Widgets/ConsoleWidget.h>
+#include <UI/Widgets/DockWidgetRegister.h>
 #include <UI/Dialogs/DialogUploader.h>
 #include <Client/Requestor.h>
 #include <Client/Settings.h>
 #include <Client/AuthProfile.h>
+#include <Utils/FontManager.h>
 #include <MainAdaptix.h>
 
-ConsoleWidget::ConsoleWidget( AdaptixWidget* w, Agent* a, Commander* c)
+REGISTER_DOCK_WIDGET(ConsoleWidget, "Agent Console", true)
+
+ConsoleWidget::ConsoleWidget( AdaptixWidget* w, Agent* a, Commander* c) : DockTab(QString("Console [%1]").arg( a->data.Id ), w->GetProfile()->GetProject())
 {
     adaptixWidget = w;
     agent         = a;
@@ -27,8 +31,6 @@ ConsoleWidget::ConsoleWidget( AdaptixWidget* w, Agent* a, Commander* c)
     connect(OutputTextEdit,   &TextEditConsole::ctx_history,                          this, &ConsoleWidget::handleShowHistory);
     connect(commander,        &Commander::commandsUpdated,                            this, &ConsoleWidget::upgradeCompleter);
 
-
-
     shortcutSearch = new QShortcut(QKeySequence("Ctrl+F"), OutputTextEdit);
     shortcutSearch->setContext(Qt::WidgetShortcut);
     connect(shortcutSearch, &QShortcut::activated, this, &ConsoleWidget::toggleSearchPanel);
@@ -47,9 +49,33 @@ ConsoleWidget::ConsoleWidget( AdaptixWidget* w, Agent* a, Commander* c)
 
     kphInputLineEdit = new KPH_ConsoleInput(InputLineEdit, OutputTextEdit, this);
     InputLineEdit->installEventFilter(kphInputLineEdit);
+
+    this->dockWidget->setWidget(this);
 }
 
 ConsoleWidget::~ConsoleWidget() {}
+
+void ConsoleWidget::SetCommander(Commander* c)
+{
+    if (commander == c)
+        return;
+
+    if (commander)
+        disconnect(commander, &Commander::commandsUpdated, this, &ConsoleWidget::upgradeCompleter);
+
+    commander = c;
+
+    if (commander)
+        connect(commander, &Commander::commandsUpdated, this, &ConsoleWidget::upgradeCompleter);
+
+    upgradeCompleter();
+}
+
+void ConsoleWidget::SetUpdatesEnabled(const bool enabled)
+{
+    OutputTextEdit->setUpdatesEnabled(enabled);
+    OutputTextEdit->setSyncMode(!enabled);
+}
 
 void ConsoleWidget::createUI()
 {
@@ -91,7 +117,7 @@ void ConsoleWidget::createUI()
 
     InputLineEdit = new QLineEdit(this);
     InputLineEdit->setProperty( "LineEditStyle", "console" );
-    InputLineEdit->setFont( QFont( "Hack" ));
+    InputLineEdit->setFont( FontManager::instance().getFont("Hack") );
 
     QString info = "";
     if ( agent->data.Domain == "" || agent->data.Computer == agent->data.Domain )
@@ -107,7 +133,7 @@ void ConsoleWidget::createUI()
     OutputTextEdit = new TextEditConsole(this, GlobalClient->settings->data.ConsoleBufferSize, GlobalClient->settings->data.ConsoleNoWrap, GlobalClient->settings->data.ConsoleAutoScroll);
     OutputTextEdit->setReadOnly(true);
     OutputTextEdit->setProperty( "TextEditStyle", "console" );
-    OutputTextEdit->setFont( QFont( "Hack" ));
+    OutputTextEdit->setFont( FontManager::instance().getFont("Hack") );
 
     MainGridLayout = new QGridLayout(this );
     MainGridLayout->setVerticalSpacing(4 );
@@ -192,7 +218,7 @@ void ConsoleWidget::SetInput(const QString &command) { InputLineEdit->setText(co
 
 void ConsoleWidget::Clear() { OutputTextEdit->clear(); }
 
-void ConsoleWidget::ConsoleOutputMessage(const qint64 timestamp, const QString &taskId, const int type, const QString &message, const QString &text, const bool completed ) const
+void ConsoleWidget::ConsoleOutputMessage(const qint64 timestamp, const QString &taskId, const int type, const QString &message, const QString &text, const bool completed)
 {
     QString promptTime = "";
     if (GlobalClient->settings->data.ConsoleTime)
@@ -230,7 +256,7 @@ void ConsoleWidget::ConsoleOutputMessage(const qint64 timestamp, const QString &
     }
 }
 
-void ConsoleWidget::ConsoleOutputPrompt(const qint64 timestamp, const QString &taskId, const QString &user, const QString &commandLine ) const
+void ConsoleWidget::ConsoleOutputPrompt(const qint64 timestamp, const QString &taskId, const QString &user, const QString &commandLine) const
 {
     QString promptTime = "";
     if (GlobalClient->settings->data.ConsoleTime)
@@ -291,35 +317,32 @@ void ConsoleWidget::ProcessCmdResult(const QString &commandLine, const Commander
         adaptixWidget->PostHooksJS[hookId] = cmdResult.post_hook;
     }
 
+    QString handlerId = "";
+    if (cmdResult.handler.isSet) {
+        handlerId = GenerateRandomString(8, "hex");
+        while (adaptixWidget->PostHandlersJS.contains(handlerId))
+            handlerId = GenerateRandomString(8, "hex");
+
+        adaptixWidget->PostHandlersJS[handlerId] = cmdResult.handler;
+    }
+
     QJsonDocument jsonDoc(cmdResult.data);
     QString commandData = jsonDoc.toJson();
 
     QJsonObject dataJson;
-    dataJson["name"]       = agent->data.Name;
-    dataJson["id"]         = agent->data.Id;
-    dataJson["ui"]         = UI;
-    dataJson["cmdline"]    = commandLine;
-    dataJson["data"]       = commandData;
-    dataJson["ax_hook_id"] = hookId;
+    dataJson["name"]          = agent->data.Name;
+    dataJson["id"]            = agent->data.Id;
+    dataJson["ui"]            = UI;
+    dataJson["cmdline"]       = commandLine;
+    dataJson["data"]          = commandData;
+    dataJson["ax_hook_id"]    = hookId;
+    dataJson["ax_handler_id"] = handlerId;
+    dataJson["wait_answer"]   = false;
     QByteArray jsonData = QJsonDocument(dataJson).toJson();
 
     /// 5 Mb
     if (commandData.size() < 0x500000) {
-        QString message = QString();
-        bool ok = false;
-        bool result = HttpReqAgentCommand(jsonData, *(agent->adaptixWidget->GetProfile()), &message, &ok);
-        if( !result ) {
-            if (cmdResult.post_hook.isSet && adaptixWidget->PostHooksJS.contains(hookId))
-                adaptixWidget->PostHooksJS.remove(hookId);
-            MessageError("Response timeout");
-            return;
-        }
-        if (!ok) {
-            if (cmdResult.post_hook.isSet && adaptixWidget->PostHooksJS.contains(hookId))
-                adaptixWidget->PostHooksJS.remove(hookId);
-            this->ConsoleOutputPrompt(0, "", "", commandLine);
-            this->ConsoleOutputMessage(0, "", CONSOLE_OUT_LOCAL_ERROR, message, "", true);
-        }
+        HttpReqAgentCommandAsync(jsonData, *(agent->adaptixWidget->GetProfile()));
     }
     else {
 
@@ -332,12 +355,16 @@ void ConsoleWidget::ProcessCmdResult(const QString &commandLine, const Commander
         if (!result) {
             if (cmdResult.post_hook.isSet && adaptixWidget->PostHooksJS.contains(hookId))
                 adaptixWidget->PostHooksJS.remove(hookId);
+            if (cmdResult.handler.isSet && adaptixWidget->PostHandlersJS.contains(handlerId))
+                adaptixWidget->PostHandlersJS.remove(handlerId);
             MessageError("Response timeout");
             return;
         }
         if (!ok) {
             if (cmdResult.post_hook.isSet && adaptixWidget->PostHooksJS.contains(hookId))
                 adaptixWidget->PostHooksJS.remove(hookId);
+            if (cmdResult.handler.isSet && adaptixWidget->PostHandlersJS.contains(handlerId))
+                adaptixWidget->PostHandlersJS.remove(handlerId);
             MessageError(message);
             return;
         }
@@ -354,6 +381,8 @@ void ConsoleWidget::ProcessCmdResult(const QString &commandLine, const Commander
             if (!success) {
                 if (cmdResult.post_hook.isSet && adaptixWidget->PostHooksJS.contains(hookId))
                     adaptixWidget->PostHooksJS.remove(hookId);
+                if (cmdResult.handler.isSet && adaptixWidget->PostHandlersJS.contains(handlerId))
+                    adaptixWidget->PostHandlersJS.remove(handlerId);
                 return;
             }
 
@@ -362,22 +391,7 @@ void ConsoleWidget::ProcessCmdResult(const QString &commandLine, const Commander
             QJsonObject data2Json;
             data2Json["object_id"] = objId;
             QByteArray json2Data = QJsonDocument(data2Json).toJson();
-
-            sUrl = agent->adaptixWidget->GetProfile()->GetURL() + "/agent/command/file";
-            QJsonObject jsonObject = HttpReq(sUrl, json2Data, agent->adaptixWidget->GetProfile()->GetAccessToken(), 10000);
-            if ( jsonObject.contains("message") && jsonObject.contains("ok") ) {
-                if (jsonObject["ok"].toBool() == false) {
-                    if (cmdResult.post_hook.isSet && adaptixWidget->PostHooksJS.contains(hookId))
-                        adaptixWidget->PostHooksJS.remove(hookId);
-                    MessageError( jsonObject["message"].toString());
-                }
-            }
-            else {
-                if (cmdResult.post_hook.isSet && adaptixWidget->PostHooksJS.contains(hookId))
-                    adaptixWidget->PostHooksJS.remove(hookId);
-                MessageError("Response timeout");
-                return;
-            }
+            HttpReqAgentCommandFileAsync(json2Data, *(agent->adaptixWidget->GetProfile()));
         });
 
         uploaderDialog->exec();

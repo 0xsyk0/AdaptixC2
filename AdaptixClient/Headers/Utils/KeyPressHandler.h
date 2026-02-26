@@ -2,6 +2,9 @@
 #define KEYPRESSHANDLER_H
 
 #include <main.h>
+#include <MainAdaptix.h>
+#include <UI/MainUI.h>
+#include <Client/AuthProfile.h>
 
 class KPH_SearchInput : public QObject
 {
@@ -13,7 +16,7 @@ public:
          inputLineEdit->installEventFilter(this);
      }
 
-signals:
+Q_SIGNALS:
     void escPressed();
 
 protected:
@@ -22,7 +25,7 @@ protected:
              QKeyEvent *keyEvent = static_cast<QKeyEvent *>(event);
 
              if ( keyEvent->key() == Qt::Key_Escape ) {
-                 emit escPressed();
+                 Q_EMIT escPressed();
              }
          }
          return QObject::eventFilter(watched, event);
@@ -34,9 +37,9 @@ protected:
 class KPH_ConsoleInput : public QObject
 {
 Q_OBJECT
-    QLineEdit*  inputLineEdit;
-    QTextEdit*  outputTextEdit;
-    QString     tmpCommandLine;
+    QLineEdit* inputLineEdit;
+    QTextEdit* outputTextEdit;
+    QString    tmpCommandLine;
 
     QStringList history;
     int historyIndex;
@@ -101,7 +104,12 @@ protected:
 
             if (keyEvent->key() == Qt::Key_Tab) {
                 if (keyEvent->modifiers() & Qt::ControlModifier) {
-                    QString filePath = QFileDialog::getOpenFileName(nullptr, "Select file");
+                    QString baseDir;
+                    if (GlobalClient && GlobalClient->mainUI) {
+                        if (auto profile = GlobalClient->mainUI->GetCurrentProfile())
+                            baseDir = profile->GetProjectDir();
+                    }
+                    QString filePath = QFileDialog::getOpenFileName(nullptr, "Select file", baseDir);
                     if (!filePath.isEmpty()) {
                         int cursorPos = inputLineEdit->cursorPosition();
                         QString text = inputLineEdit->text();

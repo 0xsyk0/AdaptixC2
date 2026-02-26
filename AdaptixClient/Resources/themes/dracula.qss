@@ -1,11 +1,12 @@
 /* Dracula Theme */
+/* @theme-type: dark */
 
-QWidget {
+QWidget[Main="base"] {
     background-color: #282a36;
     color: #f8f8f2;
 }
 
-QWidget:disabled {
+QWidget:disabled[Main="base"] {
     background-color: #21222c;
     color: #6272a4;
 }
@@ -27,6 +28,14 @@ QLabel:disabled {
 }
 
 QPushButton[ButtonStyle="dialog"] {
+    background-color: #44475a;
+    border: 1px solid #6272a4;
+    padding: 8px;
+    border-radius: 4px;
+    color: #f8f8f2;
+}
+
+QPushButton[ButtonStyle="dialog_apply"] {
     background-color: #44475a;
     border: 1px solid #6272a4;
     padding: 8px;
@@ -108,6 +117,31 @@ QTableWidget::item:selected {
 }
 
 QTableWidget:disabled {
+    background-color: #343746;
+    color: #6272a4;
+    border: 1px solid #44475a;
+}
+
+QTableView {
+    background-color: #44475a;
+    alternate-background-color: #414458;
+    border: 1px solid #6272a4;
+    color: #f8f8f2;
+    border-radius: 4px;
+}
+
+QTableView::item {
+    padding-left: 8px;
+    padding-right: 8px;
+    border: none;
+}
+
+QTableView::item:selected {
+    background-color: #6272a4;
+    color: #ffffff;
+}
+
+QTableView:disabled {
     background-color: #343746;
     color: #6272a4;
     border: 1px solid #44475a;
@@ -242,32 +276,63 @@ QPlainTextEdit:disabled {
     color: #6272a4;
 }
 
-QTabWidget::pane {
+/* KDDockWidgets TitleBar */
+#KDDWTitleBar {
+    background-color: #44475a;
+    color: #f8f8f2;
     border: 1px solid #6272a4;
+    border-bottom: none;
+}
+
+#KDDWTitleBar QLabel {
+    color: #f8f8f2;
+    background-color: transparent;
+}
+
+QTabWidget {
     background-color: #282a36;
 }
 
-QTabBar::tab {
+QTabWidget::pane {
+    border: none;
     background-color: #282a36;
-    color: #f8f8f2;
+    padding: 0px;
+    margin: 0px;
+}
+
+QTabWidget::tab-bar {
+    background-color: #44475a;
+}
+
+QTabBar {
+    background-color: #44475a;
+}
+
+QTabBar::tab {
+    background-color: #21222c;
+    color: #6272a4;
     padding: 4px;
-    border: 1px solid #6272a4;
-    border-top-left-radius: 4px;
-    border-top-right-radius: 4px;
+    border: 1px solid #44475a;
+    border-bottom: none;
+    margin-right: 2px;
 }
 
 QTabBar::tab:selected {
     background-color: #44475a;
-    color: #ffffff;
+    color: #f8f8f2;
+    border: 1px solid #6272a4;
+    border-bottom: none;
 }
 
-QTabBar::tab:hover {
-    background-color: #6272a4;
+QTabBar::tab:hover:!selected {
+    background-color: #343746;
+    color: #bd93f9;
 }
 
 QTabBar::close-button {
     image: url(:/icons/close);
-    subcontrol-position: right;
+    subcontrol-position: center right;
+    padding: 0px;
 }
 
 QTabBar::close-button:hover {
@@ -379,11 +444,17 @@ QComboBox::down-arrow {
     height: 20px;
 }
 
+QComboBox QAbstractItemView {
+    background-color: #44475a;
+    border: 1px solid #6272a4;
+    selection-background-color: #6272a4;
+    selection-color: #ffffff;
+}
+
 QComboBox QAbstractItemView::item {
     background-color: #44475a;
     color: #f8f8f2;
-    padding: 2px;
-    border-radius: 4px;
+    padding: 4px;
 }
 
 QComboBox QAbstractItemView::item:hover {
@@ -577,6 +648,12 @@ QDateEdit::down-arrow {
     height: 20px;
 }
 
+QDateEdit:disabled {
+    background-color: #343746;
+    color: #6272a4;
+    border: 1px solid #44475a;
+}
+
 QAbstractItemView#Completer {
     background-color: #44475a;
     border: 1px solid #6272a4;
@@ -674,9 +751,35 @@ QListWidget {
 }
 
 QListWidget::item {
-    padding: 2px;
+    padding: 6px 4px;
+    margin: 2px 0px;
     border-radius: 4px;
     color: #f8f8f2;
+}
+
+QListWidget::indicator {
+    width: 16px;
+    height: 16px;
+    border: 1px solid #6272a4;
+    border-radius: 3px;
+    background-color: #44475a;
+}
+
+QListWidget::indicator:checked {
+    background-color: #50fa7b;
+    border: 1px solid #50fa7b;
+    image: url(:/icons/check);
+}
+
+QListWidget::indicator:indeterminate {
+    background-color: #50fa7b;
+    border: 1px solid #50fa7b;
+    image: url(:/icons/close);
+}
+
+QListWidget::indicator:unchecked:hover {
+    border: 1px solid #bd93f9;
+    background-color: #4a4d64;
 }
 
 QListWidget::item:hover {
@@ -693,4 +796,46 @@ QListWidget::item:selected {
 
 QListWidget:focus {
     outline: none;
+}
+
+
+
+CardListWidget {
+    background-color: #44475a;
+    border: 1px solid #6272a4;
+    border-radius: 4px;
+    padding: 4px;
+
+    qproperty-itemBackground: #4a4d64;
+    qproperty-itemBackgroundHover: #565a7a;
+    qproperty-itemBackgroundSelected: #6272a4;
+    qproperty-titleColor: #f8f8f2;
+    qproperty-titleColorSelected: #ffffff;
+    qproperty-subtitleColor: #9090a0;
+    qproperty-subtitleColorSelected: #d0d0e0;
+}
+
+CardListWidget::item {
+    border: none;
+    border-radius: 4px;
+}
+
+CardListWidget::item:selected {
+    background: transparent;
+}
+
+CardListWidget::item:hover {
+    background: transparent;
+}
+
+
+
+QFrame[frameShape="4"], QFrame[frameShape="5"] {
+    color: rgba(98, 114, 164, 120);
+    background-color: rgba(98, 114, 164, 120);
+}
+
+QFrame[frameShape="4"]:disabled, QFrame[frameShape="5"]:disabled {
+    color: rgba(68, 71, 90, 80);
+    background-color: rgba(68, 71, 90, 80);
 }

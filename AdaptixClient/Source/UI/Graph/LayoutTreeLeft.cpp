@@ -1,7 +1,7 @@
 #include <UI/Graph/LayoutTreeLeft.h>
 
-double LayoutTreeLeft::X_SEP = 450;
-double LayoutTreeLeft::Y_SEP = 150;
+double LayoutTreeLeft::X_SEP = 380;
+double LayoutTreeLeft::Y_SEP = 160;
 
 void LayoutTreeLeft::draw( GraphItem* item )
 {
@@ -33,7 +33,7 @@ void LayoutTreeLeft::ReingoldTilford( GraphItem* item )
     if ( item->childItems.empty() ) {
         if ( item->parentItem && item != item->parentItem->childItems[0] ) {
             QVector<GraphItem*> children = item->parentItem->childItems;
-            GraphItem* sibling = *std::prev( std::find( children.cbegin(), children.cend(), item ) );
+            GraphItem* sibling = *std::prev( std::ranges::find(std::as_const(children), item ) );
 
             item->Prelim = sibling->Prelim + Y_SEP;
         } else {
@@ -54,7 +54,7 @@ void LayoutTreeLeft::ReingoldTilford( GraphItem* item )
 
         if ( item->parentItem && item != item->parentItem->childItems[ 0 ] ) {
             QVector<GraphItem*> children = item->parentItem->childItems;
-            GraphItem* sibling = *std::prev( std::find( children.cbegin(), children.cend(), item ) );
+            GraphItem* sibling = *std::prev( std::ranges::find(std::as_const(children), item ) );
 
             item->Prelim   = sibling->Prelim + Y_SEP;
             item->Modifier = item->Prelim - midpoint;
@@ -68,7 +68,7 @@ void LayoutTreeLeft::apportion( GraphItem* item, GraphItem*& defaultAncestor )
 {
     if ( item != item->parentItem->childItems[ 0 ] ) {
         QVector<GraphItem*> children = item->parentItem->childItems;
-        GraphItem* sibling = *std::prev( std::find( children.cbegin(), children.cend(), item ) );
+        GraphItem* sibling = *std::prev( std::ranges::find(std::as_const(children), item ) );
 
         GraphItem* vip = item;
         GraphItem* vop = item;
@@ -147,8 +147,8 @@ void LayoutTreeLeft::executeShifts( GraphItem* item )
 void LayoutTreeLeft::moveSubtree( GraphItem* wm, GraphItem* wp, double shift)
 {
     QVector<GraphItem*> children = wm->parentItem->childItems;
-    auto wmIndex  = std::distance( children.cbegin(), std::find( children.cbegin(), children.cend(), wm ) );
-    auto wpIndex  = std::distance( children.cbegin(), std::find( children.cbegin(), children.cend(), wp ) );
+    auto wmIndex  = std::distance( children.cbegin(), std::ranges::find(std::as_const(children), wm ) );
+    auto wpIndex  = std::distance( children.cbegin(), std::ranges::find(std::as_const(children), wp ) );
     int  subtrees = wpIndex - wmIndex;
 
     if ( subtrees != 0 ) {

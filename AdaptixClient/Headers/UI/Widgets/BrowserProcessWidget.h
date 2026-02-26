@@ -2,8 +2,10 @@
 #define ADAPTIXCLIENT_BROWSERPROCESSWIDGET_H
 
 #include <main.h>
+#include <UI/Widgets/AbstractDock.h>
 
 class Agent;
+class AdaptixWidget;
 
 typedef struct BrowserProcessData {
     int     pid;
@@ -20,9 +22,9 @@ typedef struct BrowserProcessDataUnix {
     QString tty;
     QString context;
     QString process;
-} BrowserProcessDataWinUnix;
+} BrowserProcessDataUnix;
 
-class BrowserProcessWidget : public QWidget
+class BrowserProcessWidget : public DockTab
 {
     QGridLayout*  mainGridLayout    = nullptr;
     QGridLayout*  listGridLayout    = nullptr;
@@ -38,8 +40,8 @@ class BrowserProcessWidget : public QWidget
     Agent*  agent;
 
     void createUI();
-    void setTableProcessDataWin(QMap<int, BrowserProcessDataWin> processMap) const;
-    void setTableProcessDataUnix(QMap<int, BrowserProcessDataUnix> processMap) const;
+    void setTableProcessDataWin(const QMap<int, BrowserProcessDataWin>& processMap) const;
+    void setTableProcessDataUnix(const QMap<int, BrowserProcessDataUnix>& processMap) const;
     void setTreeProcessDataWin(QMap<int, BrowserProcessDataWin> processMap) const;
     static void addProcessToTreeWin(QTreeWidgetItem* parent, int parentPID, QMap<int, BrowserProcessDataWin> processMap, QMap<int, QTreeWidgetItem*> *nodeMap);
     void setTreeProcessDataUnix(QMap<int, BrowserProcessDataUnix> processMap) const;
@@ -49,13 +51,13 @@ class BrowserProcessWidget : public QWidget
     void filterTableWidget(const QString &filterText) const;
 
 public:
-    BrowserProcessWidget(Agent* a);
+    BrowserProcessWidget(const AdaptixWidget* w, Agent* a);
     ~BrowserProcessWidget() override;
 
     void SetProcess(int msgType, const QString &data) const;
     void SetStatus(qint64 time, int msgType, const QString &message) const;
 
-public slots:
+public Q_SLOTS:
     void onReload() const;
     void onFilter(const QString &text) const;
     void actionCopyPid() const;

@@ -7,6 +7,16 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+func (tc *TsConnector) TcTunnelList(ctx *gin.Context) {
+	jsonTunnels, err := tc.teamserver.TsTunnelList()
+	if err != nil {
+		ctx.JSON(http.StatusOK, gin.H{"message": err.Error(), "ok": false})
+		return
+	}
+
+	ctx.Data(http.StatusOK, "application/json; charset=utf-8", []byte(jsonTunnels))
+}
+
 type TunnelStartSocks5Action struct {
 	AgentId     string `json:"agent_id"`
 	Listen      bool   `json:"listen"`
@@ -251,7 +261,7 @@ func (tc *TsConnector) TcTunnelStartRpf(ctx *gin.Context) {
 		goto ERR
 	}
 
-	_, err = tc.teamserver.TsTunnelClientStart(ta.AgentId, ta.Listen, 5, ta.Description, "", ta.Port, clientName, ta.Thost, ta.Tport, "", "")
+	tunnelId, err = tc.teamserver.TsTunnelClientStart(ta.AgentId, ta.Listen, 5, ta.Description, "", ta.Port, clientName, ta.Thost, ta.Tport, "", "")
 	if err != nil {
 		goto ERR
 	}
@@ -314,5 +324,5 @@ func (tc *TsConnector) TcTunnelSetIno(ctx *gin.Context) {
 		return
 	}
 
-	ctx.JSON(http.StatusOK, gin.H{"message": "Tunnel stopped", "ok": true})
+	ctx.JSON(http.StatusOK, gin.H{"message": "Tunnel info updated", "ok": true})
 }

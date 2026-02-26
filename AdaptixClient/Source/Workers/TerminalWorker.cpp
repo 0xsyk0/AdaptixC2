@@ -1,10 +1,10 @@
-#include <Konsole/konsole.h>
 #include <Workers/TerminalWorker.h>
-#include <UI/Widgets/TerminalWidget.h>
+#include <UI/Widgets/TerminalContainerWidget.h>
+#include <QMetaObject>
 
-TerminalWorker::TerminalWorker(TerminalWidget* terminalWidget, const QString &token, const QUrl& wsUrl, const QString& terminalData, QObject* parent) : QObject(parent)
+TerminalWorker::TerminalWorker(TerminalTab* terminalTab, const QString &token, const QUrl& wsUrl, const QString& terminalData, QObject* parent) : QObject(parent)
 {
-    this->terminalWidget = terminalWidget;
+    this->terminalTab = terminalTab;
     this->token = token;
     this->wsUrl = wsUrl;
     this->terminalData = terminalData;
@@ -21,6 +21,7 @@ void TerminalWorker::start()
 
     auto sslConfig = websocket->sslConfiguration();
     sslConfig.setPeerVerifyMode(QSslSocket::VerifyNone);
+    sslConfig.setProtocol( QSsl::TlsV1_2OrLater );
     websocket->setSslConfiguration(sslConfig);
     websocket->ignoreSslErrors();
 
@@ -50,7 +51,7 @@ void TerminalWorker::stop()
         if (websocket->state() != QAbstractSocket::UnconnectedState) {
             connect(websocket, &QWebSocket::disconnected, this, [this]() {
                 websocket->deleteLater();
-                emit finished();
+                Q_EMIT finished();
                 this->deleteLater();
             });
 
@@ -61,7 +62,7 @@ void TerminalWorker::stop()
         }
     }
 
-    emit finished();
+    Q_EMIT finished();
     this->deleteLater();
 }
 
@@ -72,21 +73,28 @@ void TerminalWorker::onWsBinaryMessageReceived(const QByteArray& msg) {
 
     if (!started) {
         started = true;
-
-        emit connectedToTerminal();
-
-        connect(this->terminalWidget->Konsole(), &QTermWidget::sendData, this, [this](const char *data, int size) {
-            if (websocket->state() == QAbstractSocket::ConnectedState) {
-                websocket->sendBinaryMessage(QByteArray(data, size));
-            }
-        });
+        Q_EMIT connectedToTerminal();
     }
 
     if (!msg.isEmpty())
-        emit binaryMessageToTerminal(msg);
+        Q_EMIT binaryMessageToTerminal(msg);
 }
 
 void TerminalWorker::onWsError(QAbstractSocket::SocketError error)
 {
-    emit errorStop();
+    Q_EMIT errorStop();
+}
+
+void TerminalWorker::sendData(const QByteArray& data)
+{
+    if (stopped)
+        return;
+
+    QMetaObject::invokeMethod(this, [this, data]() {
+        if (stopped)
+            return;
+        if (websocket && websocket->state() == QAbstractSocket::ConnectedState) {
+            websocket->sendBinaryMessage(data);
+        }
+    }, Qt::QueuedConnection);
 }

@@ -1,8 +1,7 @@
 #include <Agent/Agent.h>
-#include <Agent/AgentTableWidgetItem.h>
 #include <UI/Widgets/AdaptixWidget.h>
 #include <UI/Widgets/ConsoleWidget.h>
-#include <UI/Widgets/TerminalWidget.h>
+#include <UI/Widgets/TerminalContainerWidget.h>
 #include <UI/Widgets/BrowserFilesWidget.h>
 #include <UI/Widgets/BrowserProcessWidget.h>
 #include <UI/Graph/GraphItem.h>
@@ -16,40 +15,36 @@ Agent::Agent(QJsonObject jsonObjAgentData, AdaptixWidget* w)
 {
     this->adaptixWidget = w;
 
-    this->data.Id           = jsonObjAgentData["a_id"].toString();
-    this->data.Name         = jsonObjAgentData["a_name"].toString();
-    this->data.Listener     = jsonObjAgentData["a_listener"].toString();
-    this->data.Async        = jsonObjAgentData["a_async"].toBool();
-    this->data.ExternalIP   = jsonObjAgentData["a_external_ip"].toString();
-    this->data.InternalIP   = jsonObjAgentData["a_internal_ip"].toString();
-    this->data.GmtOffset    = jsonObjAgentData["a_gmt_offset"].toDouble();
-    this->data.WorkingTime  = jsonObjAgentData["a_workingtime"].toDouble();
-    this->data.KillDate     = jsonObjAgentData["a_killdate"].toDouble();
-    this->data.Sleep        = jsonObjAgentData["a_sleep"].toDouble();
-    this->data.Jitter       = jsonObjAgentData["a_jitter"].toDouble();
-    this->data.Pid          = jsonObjAgentData["a_pid"].toString();
-    this->data.Tid          = jsonObjAgentData["a_tid"].toString();
-    this->data.Arch         = jsonObjAgentData["a_arch"].toString();
-    this->data.Elevated     = jsonObjAgentData["a_elevated"].toBool();
-    this->data.Process      = jsonObjAgentData["a_process"].toString();
-    this->data.Os           = jsonObjAgentData["a_os"].toDouble();
-    this->data.OsDesc       = jsonObjAgentData["a_os_desc"].toString();
-    this->data.Domain       = jsonObjAgentData["a_domain"].toString();
-    this->data.Computer     = jsonObjAgentData["a_computer"].toString();
-    this->data.Username     = jsonObjAgentData["a_username"].toString();
-    this->data.Impersonated = jsonObjAgentData["a_impersonated"].toString();
-    this->data.LastTick     = jsonObjAgentData["a_last_tick"].toDouble();
-    this->data.Tags         = jsonObjAgentData["a_tags"].toString();
-    this->data.Color        = jsonObjAgentData["a_color"].toString();
-    QString mark            = jsonObjAgentData["a_mark"].toString();
-
-    QString process  = QString("%1 (%2)").arg(this->data.Process).arg(this->data.Arch);
-
-    QString username = this->data.Username;
-    if ( this->data.Elevated )
-        username = "* " + username;
-    if ( !this->data.Impersonated.isEmpty() )
-        username += " [" + this->data.Impersonated + "]";
+    this->data.Id            = jsonObjAgentData["a_id"].toString();
+    this->data.Name          = jsonObjAgentData["a_name"].toString();
+    this->data.Listener      = jsonObjAgentData["a_listener"].toString();
+    this->data.Async         = jsonObjAgentData["a_async"].toBool();
+    this->data.ExternalIP    = jsonObjAgentData["a_external_ip"].toString();
+    this->data.InternalIP    = jsonObjAgentData["a_internal_ip"].toString();
+    this->data.GmtOffset     = jsonObjAgentData["a_gmt_offset"].toDouble();
+    this->data.WorkingTime   = jsonObjAgentData["a_workingtime"].toDouble();
+    this->data.KillDate      = jsonObjAgentData["a_killdate"].toDouble();
+    this->data.Sleep         = jsonObjAgentData["a_sleep"].toDouble();
+    this->data.Jitter        = jsonObjAgentData["a_jitter"].toDouble();
+    this->data.ACP           = jsonObjAgentData["a_acp"].toDouble();
+    this->data.OemCP         = jsonObjAgentData["a_oemcp"].toDouble();
+    this->data.Pid           = jsonObjAgentData["a_pid"].toString();
+    this->data.Tid           = jsonObjAgentData["a_tid"].toString();
+    this->data.Arch          = jsonObjAgentData["a_arch"].toString();
+    this->data.Elevated      = jsonObjAgentData["a_elevated"].toBool();
+    this->data.Process       = jsonObjAgentData["a_process"].toString();
+    this->data.Os            = jsonObjAgentData["a_os"].toDouble();
+    this->data.OsDesc        = jsonObjAgentData["a_os_desc"].toString();
+    this->data.Domain        = jsonObjAgentData["a_domain"].toString();
+    this->data.Computer      = jsonObjAgentData["a_computer"].toString();
+    this->data.Username      = jsonObjAgentData["a_username"].toString();
+    this->data.Impersonated  = jsonObjAgentData["a_impersonated"].toString();
+    this->data.LastTick      = jsonObjAgentData["a_last_tick"].toDouble();
+    this->data.DateTimestamp = static_cast<qint64>(jsonObjAgentData["a_create_time"].toDouble());
+    this->data.Date          = UnixTimestampGlobalToStringLocalSmall(data.DateTimestamp);
+    this->data.Tags          = jsonObjAgentData["a_tags"].toString();
+    this->data.Color         = jsonObjAgentData["a_color"].toString();
+    this->data.Mark          = jsonObjAgentData["a_mark"].toString();
 
     for ( auto listenerData : this->adaptixWidget->Listeners) {
         if ( listenerData.Name == this->data.Listener ) {
@@ -62,232 +57,229 @@ Agent::Agent(QJsonObject jsonObjAgentData, AdaptixWidget* w)
         }
     }
 
-    QString sleep;
-    QString last;
-    if (mark == "") {
-        if ( !this->data.Async ) {
-            if ( this->connType == "internal" )
-                sleep = QString::fromUtf8("\u221E  \u221E");
-            else
-                sleep = QString::fromUtf8("\u27F6\u27F6\u27F6");
-        }
-        else {
-            sleep = QString("%1 (%2%)").arg( FormatSecToStr(this->data.Sleep) ).arg(this->data.Jitter);
-        }
-    }
-
-    this->item_Id       = new AgentTableWidgetItem( this->data.Id, this );
-    this->item_Type     = new AgentTableWidgetItem( this->data.Name, this );
-    this->item_Listener = new AgentTableWidgetItem( this->data.Listener, this );
-    this->item_External = new AgentTableWidgetItem( this->data.ExternalIP, this );
-    this->item_Internal = new AgentTableWidgetItem( this->data.InternalIP, this );
-    this->item_Domain   = new AgentTableWidgetItem( this->data.Domain, this );
-    this->item_Computer = new AgentTableWidgetItem( this->data.Computer, this );
-    this->item_Username = new AgentTableWidgetItem( username, this );
-    this->item_Os       = new AgentTableWidgetItem( this->data.OsDesc, this );
-    this->item_Process  = new AgentTableWidgetItem( process, this );
-    this->item_Pid      = new AgentTableWidgetItem( this->data.Pid, this );
-    this->item_Tid      = new AgentTableWidgetItem( this->data.Tid, this );
-    this->item_Tags     = new AgentTableWidgetItem( this->data.Tags, this );
-    this->item_Last     = new AgentTableWidgetItem( last, this );
-    this->item_Sleep    = new AgentTableWidgetItem( sleep, this );
-    this->item_Pid      = new AgentTableWidgetItem( this->data.Pid, this );
-
-    if (this->data.WorkingTime || this->data.KillDate) {
-        QString toolTip = "";
-        if (this->data.WorkingTime) {
-            uint startH = ( this->data.WorkingTime >> 24 ) % 64;
-            uint startM = ( this->data.WorkingTime >> 16 ) % 64;
-            uint endH   = ( this->data.WorkingTime >>  8 ) % 64;
-            uint endM   = ( this->data.WorkingTime >>  0 ) % 64;
-
-            QChar c = QLatin1Char('0');
-            toolTip = QString("Work time: %1:%2 - %3:%4\n").arg(startH, 2, 10, c).arg(startM, 2, 10, c).arg(endH, 2, 10, c).arg(endM, 2, 10, c);
-        }
-        if (this->data.KillDate) {
-            QDateTime dateTime = QDateTime::fromSecsSinceEpoch(this->data.KillDate);
-            toolTip += QString("Kill date: %1").arg(dateTime.toString("dd.MM.yyyy hh:mm:ss"));
-        }
-        this->item_Sleep->setToolTip(toolTip);
-    }
-
     this->UpdateImage();
     this->graphImage = this->imageActive;
 
-    if (mark == "") {
-        if ( !this->data.Color.isEmpty() )
-            this->SetColor(this->data.Color);
-    } else {
-        this->MarkItem(mark);
-    }
+    this->MarkItem(data.Mark);
 
-    auto regAgnet = this->adaptixWidget->GetRegAgent(data.Name, data.Listener, data.Os);
+    auto regAgent = this->adaptixWidget->GetRegAgent(data.Name, data.Listener, data.Os);
 
-    this->commander      = regAgnet.commander;
-    this->Console        = new ConsoleWidget(adaptixWidget, this, regAgnet.commander);
-    this->FileBrowser    = new BrowserFilesWidget(this);
-    this->ProcessBrowser = new BrowserProcessWidget(this);
-    this->Terminal       = new TerminalWidget(this, adaptixWidget);
+    if (regAgent.commander)
+        this->commander = regAgent.commander;
+    else
+        this->commander = new Commander();
+
+    this->Console        = new ConsoleWidget(adaptixWidget, this, this->commander);
+    this->Console->SetUpdatesEnabled(adaptixWidget->IsSynchronized());
 }
 
-Agent::~Agent() = default;
-
-void Agent::Update(QJsonObject jsonObjAgentData)
+Agent::~Agent()
 {
-    int old_Sleep        = this->data.Sleep;
-    int old_Jitter       = this->data.Jitter;
+    delete Console;
+    delete fileBrowser;
+    delete processBrowser;
+    delete terminal;
+    delete shell;
+}
+
+void Agent::Update(const QJsonObject &jsonObjAgentData)
+{
     QString old_Color = this->data.Color;
+    bool needUpdateImage = false;
 
-    this->data.Sleep        = jsonObjAgentData["a_sleep"].toDouble();
-    this->data.Jitter       = jsonObjAgentData["a_jitter"].toDouble();
-    this->data.WorkingTime  = jsonObjAgentData["a_workingtime"].toDouble();
-    this->data.KillDate     = jsonObjAgentData["a_killdate"].toDouble();
-    this->data.Tags         = jsonObjAgentData["a_tags"].toString();
-    this->data.Color        = jsonObjAgentData["a_color"].toString();
-    this->data.Impersonated = jsonObjAgentData["a_impersonated"].toString();
-    QString mark            = jsonObjAgentData["a_mark"].toString();
+    QString oldListener = this->data.Listener;
 
-    this->item_Tags->setText(this->data.Tags);
+    QJsonValue val = jsonObjAgentData.value("a_sleep");
+    if (val.isDouble())
+        this->data.Sleep = val.toDouble();
 
-    QString username = this->data.Username;
-    if ( this->data.Elevated )
-        username = "* " + username;
-    if ( !this->data.Impersonated.isEmpty() )
-        username += " [" + this->data.Impersonated + "]";
+    val = jsonObjAgentData.value("a_jitter");
+    if (val.isDouble())
+        this->data.Jitter = val.toDouble();
 
-    if (this->item_Username->text() != username) {
-        this->item_Username->setText(username);
+    val = jsonObjAgentData.value("a_workingtime");
+    if (val.isDouble())
+        this->data.WorkingTime = val.toDouble();
 
+    val = jsonObjAgentData.value("a_killdate");
+    if (val.isDouble())
+        this->data.KillDate = val.toDouble();
+
+    val = jsonObjAgentData.value("a_impersonated");
+    if (val.isString())
+        this->data.Impersonated = val.toString();
+
+    val = jsonObjAgentData.value("a_tags");
+    if (val.isString())
+        this->data.Tags = val.toString();
+
+    val = jsonObjAgentData.value("a_color");
+    if (val.isString())
+        this->data.Color = val.toString();
+
+    val = jsonObjAgentData.value("a_internal_ip");
+    if (val.isString())
+        this->data.InternalIP = val.toString();
+
+    val = jsonObjAgentData.value("a_external_ip");
+    if (val.isString())
+        this->data.ExternalIP = val.toString();
+
+    val = jsonObjAgentData.value("a_gmt_offset");
+    if (val.isDouble())
+        this->data.GmtOffset = val.toDouble();
+
+    val = jsonObjAgentData.value("a_acp");
+    if (val.isDouble())
+        this->data.ACP = val.toDouble();
+
+    val = jsonObjAgentData.value("a_oemcp");
+    if (val.isDouble())
+        this->data.OemCP = val.toDouble();
+
+    val = jsonObjAgentData.value("a_pid");
+    if (val.isString())
+        this->data.Pid = val.toString();
+
+    val = jsonObjAgentData.value("a_tid");
+    if (val.isString())
+        this->data.Tid = val.toString();
+
+    val = jsonObjAgentData.value("a_arch");
+    if (val.isString())
+        this->data.Arch = val.toString();
+
+    val = jsonObjAgentData.value("a_elevated");
+    if (val.isBool()) {
+        this->data.Elevated = val.toBool();
+        needUpdateImage = true;
     }
 
-    if (this->data.WorkingTime || this->data.KillDate) {
-        QString toolTip = "";
-        if (this->data.WorkingTime) {
-            uint startH = ( this->data.WorkingTime >> 24 ) % 64;
-            uint startM = ( this->data.WorkingTime >> 16 ) % 64;
-            uint endH   = ( this->data.WorkingTime >>  8 ) % 64;
-            uint endM   = ( this->data.WorkingTime >>  0 ) % 64;
+    val = jsonObjAgentData.value("a_process");
+    if (val.isString())
+        this->data.Process = val.toString();
 
-            QChar c = QLatin1Char('0');
-            toolTip = QString("Work time: %1:%2 - %3:%4\n").arg(startH, 2, 10, c).arg(startM, 2, 10, c).arg(endH, 2, 10, c).arg(endM, 2, 10, c);
-        }
-        if (this->data.KillDate) {
-            QDateTime dateTime = QDateTime::fromSecsSinceEpoch(this->data.KillDate);
-            toolTip += QString("Kill date: %1").arg(dateTime.toString("dd.MM.yyyy hh:mm:ss"));
-        }
-        this->item_Sleep->setToolTip(toolTip);
+    val = jsonObjAgentData.value("a_os");
+    if (val.isDouble()) {
+        this->data.Os = val.toDouble();
+        needUpdateImage = true;
     }
+
+    val = jsonObjAgentData.value("a_os_desc");
+    if (val.isString())
+        this->data.OsDesc = val.toString();
+
+    val = jsonObjAgentData.value("a_domain");
+    if (val.isString())
+        this->data.Domain = val.toString();
+
+    val = jsonObjAgentData.value("a_computer");
+    if (val.isString())
+        this->data.Computer = val.toString();
+
+    val = jsonObjAgentData.value("a_username");
+    if (val.isString())
+        this->data.Username = val.toString();
+
+    val = jsonObjAgentData.value("a_listener");
+    if (val.isString()) {
+        this->data.Listener = val.toString();
+    }
+
+    if (oldListener != this->data.Listener) {
+        this->listenerType = "";
+        this->connType = "";
+
+        for (auto listenerData : this->adaptixWidget->Listeners) {
+            if (listenerData.Name == this->data.Listener) {
+                this->listenerType = listenerData.ListenerRegName;
+                if (listenerData.ListenerType == "internal")
+                    this->connType = "internal";
+                else
+                    this->connType = "external";
+                break;
+            }
+        }
+
+        auto regAgent = this->adaptixWidget->GetRegAgent(data.Name, data.Listener, data.Os);
+        if (regAgent.commander && regAgent.commander != this->commander) {
+            this->commander = regAgent.commander;
+            if (this->Console)
+                this->Console->SetCommander(this->commander);
+        }
+
+        if (this->graphItem)
+            this->graphItem->invalidateCache();
+    }
+
+    if (needUpdateImage)
+        this->UpdateImage();
+
+    QString mark = this->data.Mark;
+    val = jsonObjAgentData.value("a_mark");
+    if (val.isString())
+        mark = val.toString();
 
     if (this->data.Mark == mark) {
-        if (old_Sleep != this->data.Sleep || old_Jitter != this->data.Jitter) {
-            QString sleep = QString("%1 (%2%)").arg( FormatSecToStr(this->data.Sleep) ).arg(this->data.Jitter);
-            item_Sleep->setText(sleep);
-        }
         if (this->data.Color != old_Color) {
             if (this->data.Mark == "") {
-                this->SetColor(this->data.Color);
+                if (this->data.Color.isEmpty()) {
+                    this->bg_color = QColor();
+                    this->fg_color = QColor();
+                } else {
+                    QStringList colors = this->data.Color.split('-');
+                    if (colors.size() == 2) {
+                        this->bg_color = QColor(colors[0]);
+                        this->fg_color = QColor(colors[1]);
+                    }
+                }
             }
         }
     }
     else {
+        QString oldMark = this->data.Mark;
         this->MarkItem(mark);
-        if (mark == "Terminated") {
-            adaptixWidget->SessionsGraphPage->RemoveAgent(this, true);
+
+        if (mark == "Terminated" || mark == "Inactive") {
+            adaptixWidget->SessionsGraphDock->RemoveAgent(this, true);
+        }
+        else if ((oldMark == "Terminated" || oldMark == "Inactive") && !this->graphItem) {
+            adaptixWidget->SessionsGraphDock->AddAgent(this, true);
         }
     }
 }
 
 void Agent::MarkItem(const QString &mark)
 {
-    if (this->data.Mark == mark)
-        return;
-
-    this->data.Mark = mark;
     QString color;
-    QString sleepMark;
-    QString lastMarrk;
     if ( mark == "" ) {
-        if ( !this->data.Async ) {
-            if ( this->connType == "internal" )
-                sleepMark = QString::fromUtf8("\u221E  \u221E");
-            else
-                sleepMark = QString::fromUtf8("\u27F6\u27F6\u27F6");
-            item_Last->setText("");
-        }
-        else {
-            sleepMark = QString("%1 (%2%)").arg( FormatSecToStr(this->data.Sleep) ).arg(this->data.Jitter);
-        }
         this->active = true;
         color = this->data.Color;
         this->graphImage = this->imageActive;
     }
     else {
-        if ( mark == "Terminated" ) {
+        if ( mark == "Terminated" || mark == "Inactive" ||  mark == "Unlink" || mark == "Disconnect" ) {
             this->active = false;
-            item_Last->setText(UnixTimestampGlobalToStringLocalSmall(data.LastTick));
-        }
-        else if ( mark == "Inactive" ) {
-            this->active = false;
-            item_Last->setText(UnixTimestampGlobalToStringLocalSmall(data.LastTick));
-        }
-        else if ( mark == "Unlink" ) {
-            this->active = false;
-            item_Last->setText(UnixTimestampGlobalToStringLocalSmall(data.LastTick));
-        }
-        else if ( mark == "Disconnect" ) {
-            this->active = false;
-            item_Last->setText(UnixTimestampGlobalToStringLocalSmall(data.LastTick));
         }
         this->graphImage = this->imageInactive;
-        sleepMark = mark;
         color = QString(COLOR_DarkBrownishRed) + "-" + QString(COLOR_LightGray);
     }
 
     if (this->graphItem)
-        this->graphItem->update();
+        this->graphItem->invalidateCache();
 
-    this->SetColor(color);
-    this->item_Sleep->setText(sleepMark);
-}
-
-void Agent::SetColor(const QString &color) const
-{
     if (color.isEmpty()) {
-        this->item_Id->RevertColor();
-        this->item_Type->RevertColor();
-        this->item_Listener->RevertColor();
-        this->item_External->RevertColor();
-        this->item_Internal->RevertColor();
-        this->item_Domain->RevertColor();
-        this->item_Computer->RevertColor();
-        this->item_Username->RevertColor();
-        this->item_Os->RevertColor();
-        this->item_Process->RevertColor();
-        this->item_Pid->RevertColor();
-        this->item_Tid->RevertColor();
-        this->item_Tags->RevertColor();
-        this->item_Last->RevertColor();
-        this->item_Sleep->RevertColor();
+        this->bg_color = QColor();
+        this->fg_color = QColor();
     } else {
         QStringList colors = color.split('-');
         if (colors.size() == 2) {
-            this->item_Id->SetColor(QColor(colors[0]), QColor(colors[1]));
-            this->item_Type->SetColor(QColor(colors[0]), QColor(colors[1]));
-            this->item_Listener->SetColor(QColor(colors[0]), QColor(colors[1]));
-            this->item_External->SetColor(QColor(colors[0]), QColor(colors[1]));
-            this->item_Internal->SetColor(QColor(colors[0]), QColor(colors[1]));
-            this->item_Domain->SetColor(QColor(colors[0]), QColor(colors[1]));
-            this->item_Computer->SetColor(QColor(colors[0]), QColor(colors[1]));
-            this->item_Username->SetColor(QColor(colors[0]), QColor(colors[1]));
-            this->item_Os->SetColor(QColor(colors[0]), QColor(colors[1]));
-            this->item_Process->SetColor(QColor(colors[0]), QColor(colors[1]));
-            this->item_Pid->SetColor(QColor(colors[0]), QColor(colors[1]));
-            this->item_Tid->SetColor(QColor(colors[0]), QColor(colors[1]));
-            this->item_Tags->SetColor(QColor(colors[0]), QColor(colors[1]));
-            this->item_Last->SetColor(QColor(colors[0]), QColor(colors[1]));
-            this->item_Sleep->SetColor(QColor(colors[0]), QColor(colors[1]));
+            this->bg_color = QColor(colors[0]);
+            this->fg_color = QColor(colors[1]);
         }
     }
+
+    this->data.Mark = mark;
 }
 
 void Agent::UpdateImage()
@@ -295,34 +287,36 @@ void Agent::UpdateImage()
     QString v = "v1";
     if (GlobalClient->settings->data.GraphVersion == "Version 2")
         v = "v2";
+    if (GlobalClient->settings->data.GraphVersion == "Version 3")
+        v = "v3";
 
     if (data.Os == OS_WINDOWS) {
         if (data.Elevated) {
-            this->item_Os->setIcon(QIcon(":/icons/os_win_red"));
+            this->iconOs = QIcon(":/icons/os_win_red");
             this->imageActive = QImage(":/graph/"+v+"/win_red");
         }
         else {
-            this->item_Os->setIcon(QIcon(":/icons/os_win_blue"));
+            this->iconOs = QIcon(":/icons/os_win_blue");
             this->imageActive = QImage(":/graph/"+v+"/win_blue");
         }
         this->imageInactive = QImage(":/graph/"+v+"/win_grey");
     }
     else if (data.Os == OS_LINUX) {
         if (data.Elevated) {
-            this->item_Os->setIcon(QIcon(":/icons/os_linux_red"));
+            this->iconOs = QIcon(":/icons/os_linux_red");
             this->imageActive = QImage(":/graph/"+v+"/linux_red");
         } else {
-            this->item_Os->setIcon(QIcon(":/icons/os_linux_blue"));
+            this->iconOs = QIcon(":/icons/os_linux_blue");
             this->imageActive = QImage(":/graph/"+v+"/linux_blue");
         }
         this->imageInactive = QImage(":/graph/"+v+"/linux_grey");
     }
     else if (data.Os == OS_MAC) {
         if (data.Elevated) {
-            this->item_Os->setIcon(QIcon(":/icons/os_mac_red"));
+            this->iconOs = QIcon(":/icons/os_mac_red");
             this->imageActive = QImage(":/graph/"+v+"/mac_red");
         } else {
-            this->item_Os->setIcon(QIcon(":/icons/os_mac_blue"));
+            this->iconOs = QIcon(":/icons/os_mac_blue");
             this->imageActive = QImage(":/graph/"+v+"/mac_blue");
         }
         this->imageInactive = QImage(":/graph/"+v+"/mac_grey");
@@ -345,26 +339,14 @@ void Agent::UpdateImage()
 
 /// TASK
 
-QString Agent::TasksCancel(const QStringList &tasks) const
+void Agent::TasksCancel(const QStringList &tasks) const
 {
-    QString message = QString();
-    bool ok = false;
-    bool result = HttpReqTaskCancel( data.Id, tasks, *(adaptixWidget->GetProfile()), &message, &ok);
-    if (!result)
-        return "Response timeout";
-
-    return message;
+    HttpReqTaskCancelAsync(data.Id, tasks, *(adaptixWidget->GetProfile()), [](bool, const QString&, const QJsonObject&) {});
 }
 
-QString Agent::TasksDelete(const QStringList &tasks) const
+void Agent::TasksDelete(const QStringList &tasks) const
 {
-    QString message = QString();
-    bool ok = false;
-    bool result = HttpReqTasksDelete(data.Id, tasks, *(adaptixWidget->GetProfile()), &message, &ok);
-    if (!result)
-        return "Response timeout";
-
-    return message;
+    HttpReqTasksDeleteAsync(data.Id, tasks, *(adaptixWidget->GetProfile()), [](bool, const QString&, const QJsonObject&) {});
 }
 
 /// PIVOT
@@ -373,16 +355,14 @@ void Agent::SetParent(const PivotData &pivotData)
 {
     this->parentId = pivotData.ParentAgentId;
     this->data.ExternalIP = QString::fromUtf8("%1 \u221E %2").arg(pivotData.ParentAgentId).arg(pivotData.PivotName);
-    this->item_External->setText(this->data.ExternalIP);
-    this->item_Last->setText( QString::fromUtf8("\u221E\u221E\u221E") );
+    this->LastMark = QString::fromUtf8("\u221E\u221E\u221E");
 }
 
 void Agent::UnsetParent(const PivotData &pivotData)
 {
     this->parentId = "";
     this->data.ExternalIP = "";
-    this->item_External->setText(this->data.ExternalIP);
-    this->item_Last->setText( QString::fromUtf8("\u221E  \u221E") );
+    this->LastMark = QString::fromUtf8("\u221E  \u221E");
 }
 
 void Agent::AddChild(const PivotData &pivotData) { this->childsId.push_back(pivotData.ChildAgentId); }
@@ -395,4 +375,32 @@ void Agent::RemoveChild(const PivotData &pivotData)
             break;
         }
     }
+}
+
+BrowserFilesWidget* Agent::GetFileBrowser()
+{
+    if (!fileBrowser)
+        fileBrowser = new BrowserFilesWidget(adaptixWidget, this);
+    return fileBrowser;
+}
+
+BrowserProcessWidget* Agent::GetProcessBrowser()
+{
+    if (!processBrowser)
+        processBrowser = new BrowserProcessWidget(adaptixWidget, this);
+    return processBrowser;
+}
+
+TerminalContainerWidget* Agent::GetTerminal()
+{
+    if (!terminal)
+        terminal = new TerminalContainerWidget(this, adaptixWidget);
+    return terminal;
+}
+
+TerminalContainerWidget* Agent::GetShell()
+{
+    if (!shell)
+        shell = new TerminalContainerWidget(this, adaptixWidget, TerminalModeShell);
+    return shell;
 }

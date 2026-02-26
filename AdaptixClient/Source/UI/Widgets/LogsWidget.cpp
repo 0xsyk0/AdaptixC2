@@ -1,7 +1,12 @@
 #include <UI/Widgets/LogsWidget.h>
+#include <UI/Widgets/AdaptixWidget.h>
+#include <UI/Widgets/DockWidgetRegister.h>
+#include <Client/AuthProfile.h>
 #include <Utils/Convert.h>
 
-LogsWidget::LogsWidget()
+REGISTER_DOCK_WIDGET(LogsWidget, "Logs", true)
+
+LogsWidget::LogsWidget(const AdaptixWidget* w) : DockTab("Logs", w->GetProfile()->GetProject(), ":/icons/logs")
 {
     this->createUI();
 
@@ -22,6 +27,8 @@ LogsWidget::LogsWidget()
     shortcutSearch = new QShortcut(QKeySequence("Ctrl+A"), logsConsoleTextEdit);
     shortcutSearch->setContext(Qt::WidgetShortcut);
     connect(shortcutSearch, &QShortcut::activated, logsConsoleTextEdit, &QTextEdit::selectAll);
+
+    this->dockWidget->setWidget(this);
 }
 
 LogsWidget::~LogsWidget() = default;
@@ -60,6 +67,7 @@ void LogsWidget::createUI()
     logsConsoleTextEdit = new TextEditConsole(this);
     logsConsoleTextEdit->setReadOnly(true);
     logsConsoleTextEdit->setProperty("TextEditStyle", "console" );
+    logsConsoleTextEdit->setAutoScrollEnabled(true);
 
     logsGridLayout = new QGridLayout(this);
     logsGridLayout->setContentsMargins(1, 1, 1, 1);
@@ -70,22 +78,20 @@ void LogsWidget::createUI()
     logsWidget = new QWidget(this);
     logsWidget->setLayout(logsGridLayout);
 
-
-
     /// ToDo: todo list + sync chat
-    todoLabel = new QLabel(this);
-    todoLabel->setText("ToDo notes");
-    todoLabel->setAlignment(Qt::AlignCenter);
-
-    todoGridLayout = new QGridLayout(this);
-    todoGridLayout->setContentsMargins(1, 1, 1, 1);
-    todoGridLayout->setVerticalSpacing(1);
-    todoGridLayout->setHorizontalSpacing(2);
-
-    todoGridLayout->addWidget(todoLabel, 0, 0, 1, 1);
-
-    todoWidget = new QWidget(this);
-    todoWidget->setLayout(todoGridLayout);
+    // todoLabel = new QLabel(this);
+    // todoLabel->setText("ToDo notes");
+    // todoLabel->setAlignment(Qt::AlignCenter);
+    //
+    // todoGridLayout = new QGridLayout(this);
+    // todoGridLayout->setContentsMargins(1, 1, 1, 1);
+    // todoGridLayout->setVerticalSpacing(1);
+    // todoGridLayout->setHorizontalSpacing(2);
+    //
+    // todoGridLayout->addWidget(todoLabel, 0, 0, 1, 1);
+    //
+    // todoWidget = new QWidget(this);
+    // todoWidget->setLayout(todoGridLayout);
 
 
 
@@ -99,6 +105,11 @@ void LogsWidget::createUI()
     mainGridLayout->addWidget( mainHSplitter, 0, 0, 1, 1);
 
     this->setLayout( mainGridLayout );
+}
+
+void LogsWidget::SetUpdatesEnabled(const bool enabled)
+{
+    logsConsoleTextEdit->setUpdatesEnabled(enabled);
 }
 
 void LogsWidget::findAndHighlightAll(const QString &pattern)
@@ -150,23 +161,22 @@ void LogsWidget::highlightCurrent() const
     searchLabel->setText(QString("%1 of %2").arg(currentIndex + 1).arg(sels.size()));
 }
 
-void LogsWidget::AddLogs(const int type, const qint64 time, const QString &message ) const
+void LogsWidget::AddLogs(const int type, const qint64 time, const QString &message)
 {
     QString sTime = UnixTimestampGlobalToStringLocal(time);
-    QString log = QString("[%1] -> ").arg(sTime);
+    QString logTime = QString("[%1] -> ").arg(sTime);
+    logsConsoleTextEdit->appendPlain(logTime);
 
-    logsConsoleTextEdit->appendPlain(log);
+    QString logMsg = message + "\n";
 
-    if( type == EVENT_CLIENT_CONNECT )           logsConsoleTextEdit->appendColor(message, QColor(COLOR_ConsoleWhite));
-    else if( type == EVENT_CLIENT_DISCONNECT )   logsConsoleTextEdit->appendColor(message, QColor(COLOR_Gray));
-    else if( type == EVENT_LISTENER_START )      logsConsoleTextEdit->appendColor(message, QColor(COLOR_BrightOrange));
-    else if( type == EVENT_LISTENER_STOP )       logsConsoleTextEdit->appendColor(message, QColor(COLOR_BrightOrange));
-    else if( type == EVENT_AGENT_NEW )           logsConsoleTextEdit->appendColor(message, QColor(COLOR_NeonGreen));
-    else if( type == EVENT_TUNNEL_START )        logsConsoleTextEdit->appendColor(message, QColor(COLOR_PastelYellow));
-    else if( type == EVENT_TUNNEL_STOP )         logsConsoleTextEdit->appendColor(message, QColor(COLOR_PastelYellow));
-    else                                         logsConsoleTextEdit->appendPlain(message);
-
-    logsConsoleTextEdit->appendPlain("\n");
+    if( type == EVENT_CLIENT_CONNECT )         logsConsoleTextEdit->appendColor(logMsg, QColor(COLOR_ConsoleWhite));
+    else if( type == EVENT_CLIENT_DISCONNECT ) logsConsoleTextEdit->appendColor(logMsg, QColor(COLOR_Gray));
+    else if( type == EVENT_LISTENER_START )    logsConsoleTextEdit->appendColor(logMsg, QColor(COLOR_BrightOrange));
+    else if( type == EVENT_LISTENER_STOP )     logsConsoleTextEdit->appendColor(logMsg, QColor(COLOR_BrightOrange));
+    else if( type == EVENT_AGENT_NEW )         logsConsoleTextEdit->appendColor(logMsg, QColor(COLOR_NeonGreen));
+    else if( type == EVENT_TUNNEL_START )      logsConsoleTextEdit->appendColor(logMsg, QColor(COLOR_PastelYellow));
+    else if( type == EVENT_TUNNEL_STOP )       logsConsoleTextEdit->appendColor(logMsg, QColor(COLOR_PastelYellow));
+    else                                       logsConsoleTextEdit->appendPlain(logMsg);
 }
 
 void LogsWidget::Clear() const

@@ -11,6 +11,8 @@ struct ExtensionFile;
 struct AxMenuItem;
 struct AxEvent;
 class  AxScriptEngine;
+class  AxScriptWorker;
+class  AxUiFactory;
 class  AdaptixWidget;
 class  Agent;
 
@@ -42,15 +44,18 @@ class AxScriptManager : public QObject {
 Q_OBJECT
     AdaptixWidget*  adaptixWidget = nullptr;
     AxScriptEngine* mainScript    = nullptr;
+    AxUiFactory*    uiFactory     = nullptr;
     QMap<QString, AxScriptEngine*> scripts;
     QMap<QString, AxScriptEngine*> listeners_scripts;
     QMap<QString, AxScriptEngine*> agents_scripts;
+    QMap<QString, AxScriptEngine*> services_scripts;
 
 public:
     AxScriptManager(AdaptixWidget* main_widget, QObject *parent = nullptr);
     ~AxScriptManager() override;
 
     QJSEngine* MainScriptEngine();
+    AxUiFactory* GetUiFactory() const;
     void ResetMain();
     void Clear();
 
@@ -58,6 +63,7 @@ public:
     AdaptixWidget*              GetAdaptix() const;
     QMap<QString, Agent*>       GetAgents() const;
     QVector<CredentialData>     GetCredentials() const;
+    QVector<ListenerData>       GetListeners() const;
     QMap<QString, DownloadData> GetDownloads() const;
     QMap<QString, ScreenData>   GetScreenshots() const;
     QVector<TargetData>         GetTargets() const;
@@ -73,33 +79,52 @@ public:
     QJSEngine*  AgentScriptEngine(const QString &name);
     QJSValue    AgentScriptExecute(const QString &name, const QString &code);
 
+    QStringList ServiceScriptList();
+    void        ServiceScriptAdd(const QString &name, const QString &ax_script);
+    QJSEngine*  ServiceScriptEngine(const QString &name);
+    void        ServiceScriptDataHandler(const QString &name, const QString &data);
+
     QStringList ScriptList();
     bool        ScriptAdd(ExtensionFile* ext);
     void        ScriptRemove(const ExtensionFile &ext);
 
     void GlobalScriptLoad(const QString &path);
     void GlobalScriptUnload(const QString &path);
+    void GlobalScriptLoadAsync(const QString &path);
+    
+    void ExecuteAsync(const QString& code, const QString& name = "async");
+    void ExecuteSmart(const QString& code, const QString& name = "smart");
+    
+    static bool containsUiCalls(const QString& code);
 
     void        RegisterCommandsGroup(const CommandsGroup &group, const QStringList &listeners, const QStringList &agents, const QList<int> &os);
     void        EventRemove(const QString &event_id);
     QStringList EventList();
-    QList<AxMenuItem> FilterMenuItems(const QStringList &agentIds, const QString &menuType);
+    QList<AxMenuItem> FilterMenuItems(const QStringList &agentIds, const QString &menuType, const bool &agentsNeed);
     QList<AxEvent>    FilterEvents(const QString &agentId, const QString &eventType);
 
+    QList<AxScriptEngine*> getAllEngines() const;
+    QList<AxMenuItem> collectMenuItems(const QString &menuType) const;
+    QList<AxEvent> collectEvents(const QString &eventType) const;
+    void safeCallHandler(const AxEvent& event, const QJSValueList& args = QJSValueList());
+    int  addMenuItemsToMenu(QMenu* menu, const QList<AxMenuItem>& items, const QVariantList& context);
+
+    void AppAgentHide(const QStringList &agents);
+    void AppAgentRemove(const QStringList &agents);
     void AppAgentSetColor(const QStringList &agents, const QString &background, const QString &foreground, const bool reset);
-    void AppAgentSetImpersonate(const QString &id, const QString &impersonate, const bool elevated);
     void AppAgentSetMark(const QStringList &agents, const QString &mark);
     void AppAgentSetTag(const QStringList &agents, const QString &tag);
+    void AppAgentUpdateData(const QString &id, const QJsonObject &updateData);
 
     int AddMenuSession(QMenu* menu, const QString &menuType, QStringList agentIds);
     int AddMenuFileBrowser(QMenu* menu, QVector<DataMenuFileBrowser> files);
     int AddMenuProcessBrowser(QMenu* menu, QVector<DataMenuProcessBrowser> processes);
-    int AddMenuDownload(QMenu* menu, const QString &menuType, QVector<DataMenuDownload> files);
+    int AddMenuDownload(QMenu* menu, const QString &menuType, QVector<DataMenuDownload> files, const bool &agnetNeed);
     int AddMenuTask(QMenu* menu, const QString &menuType, const QStringList &tasks);
     int AddMenuTargets(QMenu* menu, const QString &menuType, const QStringList &targets);
     int AddMenuCreds(QMenu* menu, const QString &menuType, const QStringList &creds);
 
-public slots:
+public Q_SLOTS:
     void consolePrintMessage(const QString &message);
     void consolePrintError(const QString &message);
 

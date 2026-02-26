@@ -22,6 +22,7 @@ void TunnelWorker::start()
 
     auto sslConfig = websocket->sslConfiguration();
     sslConfig.setPeerVerifyMode(QSslSocket::VerifyNone);
+    sslConfig.setProtocol( QSsl::TlsV1_2OrLater );
     websocket->setSslConfiguration(sslConfig);
     websocket->ignoreSslErrors();
 
@@ -60,7 +61,7 @@ void TunnelWorker::stop()
         websocket->close();
     }
 
-    emit finished();
+    Q_EMIT finished();
 }
 
 void TunnelWorker::onTcpReadyRead()
@@ -70,7 +71,8 @@ void TunnelWorker::onTcpReadyRead()
 
     QByteArray data = tcpSocket->readAll();
     if (!data.isEmpty()) {
-        if (wsConnected) {
+        QMutexLocker locker(&wsBufferMutex);
+        if (wsConnected.load()) {
             websocket->sendBinaryMessage(data);
         } else {
             wsBuffer.enqueue(data);
@@ -80,20 +82,17 @@ void TunnelWorker::onTcpReadyRead()
 
 void TunnelWorker::onWsConnected()
 {
-    {
-        QMutexLocker locker(&wsBufferMutex);
-        while (!wsBuffer.isEmpty()) {
-            QByteArray data = wsBuffer.dequeue();
-            websocket->sendBinaryMessage(data);
-        }
+    QMutexLocker locker(&wsBufferMutex);
+    wsConnected.store(true);
+    while (!wsBuffer.isEmpty()) {
+        QByteArray data = wsBuffer.dequeue();
+        websocket->sendBinaryMessage(data);
     }
-
-    wsConnected = true;
 }
 
 void TunnelWorker::onWsBinaryMessageReceived(const QByteArray& msg) const
 {
-    if (stopped)
+    if (stopped || !tcpSocket)
         return;
 
     tcpSocket->write(msg);

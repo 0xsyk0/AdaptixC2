@@ -2,6 +2,8 @@
 #define AXCONSOLEWIDGET_H
 
 #include <main.h>
+#include <QPointer>
+#include <UI/Widgets/AbstractDock.h>
 
 class AdaptixWidget;
 class AxScriptManager;
@@ -9,10 +11,10 @@ class TextEditConsole;
 class ClickableLabel;
 class KPH_ConsoleInput;
 
-class AxConsoleWidget : public QWidget
+class AxConsoleWidget : public DockTab
 {
     AdaptixWidget*   adaptixWidget = nullptr;
-    AxScriptManager* scriptManager = nullptr;
+    QPointer<AxScriptManager> scriptManager;
 
     QGridLayout*     MainGridLayout = nullptr;
     QLabel*          CmdLabel       = nullptr;
@@ -43,13 +45,15 @@ public:
     explicit AxConsoleWidget(AxScriptManager* m, AdaptixWidget* w);
     ~AxConsoleWidget() override;
 
+    void SetUpdatesEnabled(const bool enabled);
+
     void OutputClear() const;
     void InputFocus() const;
     void AddToHistory(const QString& command);
     void PrintMessage(const QString& message);
     void PrintError(const QString& message);
 
-public slots:
+public Q_SLOTS:
     void processInput();
     void toggleSearchPanel();
     void handleSearch();

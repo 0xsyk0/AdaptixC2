@@ -1,6 +1,8 @@
 #include <QJSEngine>
+#include <QPointer>
+#include <QElapsedTimer>
+#include <QTimer>
 #include <Agent/Agent.h>
-#include <Agent/Task.h>
 #include <Workers/LastTickWorker.h>
 #include <Workers/WebSocketWorker.h>
 #include <UI/Widgets/AdaptixWidget.h>
@@ -8,9 +10,10 @@
 #include <UI/Widgets/AxConsoleWidget.h>
 #include <UI/Widgets/BrowserFilesWidget.h>
 #include <UI/Widgets/BrowserProcessWidget.h>
-#include <UI/Widgets/TerminalWidget.h>
+#include <UI/Widgets/TerminalContainerWidget.h>
 #include <UI/Widgets/SessionsTableWidget.h>
 #include <UI/Widgets/LogsWidget.h>
+#include <UI/Widgets/ChatWidget.h>
 #include <UI/Widgets/ListenersWidget.h>
 #include <UI/Widgets/DownloadsWidget.h>
 #include <UI/Widgets/ScreenshotsWidget.h>
@@ -26,12 +29,19 @@
 #include <Client/TunnelEndpoint.h>
 #include <Client/AxScript/AxScriptManager.h>
 #include <Client/AxScript/AxCommandWrappers.h>
+#include <kddockwidgets/core/DockRegistry.h>
 
 AdaptixWidget::AdaptixWidget(AuthProfile* authProfile, QThread* channelThread, WebSocketWorker* channelWsWorker)
 {
+    this->profile = authProfile;
+
     this->createUI();
     this->ChannelThread   = channelThread;
     this->ChannelWsWorker = channelWsWorker;
+
+    pendingPacketsTimer = new QTimer(this);
+    pendingPacketsTimer->setInterval(0);
+    connect(pendingPacketsTimer, &QTimer::timeout, this, &AdaptixWidget::processPendingSyncPackets);
 
     ScriptManager = new AxScriptManager(this, this);
     connect(this, &AdaptixWidget::eventNewAgent,           ScriptManager, &AxScriptManager::emitNewAgent);
@@ -40,26 +50,23 @@ AdaptixWidget::AdaptixWidget(AuthProfile* authProfile, QThread* channelThread, W
     connect(this, &AdaptixWidget::eventFileBrowserUpload,  ScriptManager, &AxScriptManager::emitFileBrowserUpload);
     connect(this, &AdaptixWidget::eventProcessBrowserList, ScriptManager, &AxScriptManager::emitProcessBrowserList);
 
-    AxConsoleTab      = new AxConsoleWidget(ScriptManager, this);
-    LogsTab           = new LogsWidget();
-    ListenersTab      = new ListenersWidget(this);
-    SessionsTablePage = new SessionsTableWidget(this);
-    SessionsGraphPage = new SessionsGraph(this);
-    TunnelsTab        = new TunnelsWidget(this);
-    DownloadsTab      = new DownloadsWidget(this);
-    ScreenshotsTab    = new ScreenshotsWidget(this);
-    CredentialsTab    = new CredentialsWidget(this);
-    TasksTab          = new TasksWidget(this);
-    TargetsTab        = new TargetsWidget(this);
+    AxConsoleDock     = new AxConsoleWidget(ScriptManager, this);
+    LogsDock          = new LogsWidget(this);
+    ChatDock          = new ChatWidget(this);
+    ListenersDock     = new ListenersWidget(this);
+    SessionsTableDock = new SessionsTableWidget(this);
+    SessionsGraphDock = new SessionsGraph(this);
+    TasksDock         = new TasksWidget(this);
+    TunnelsDock       = new TunnelsWidget(this);
+    DownloadsDock     = new DownloadsWidget(this);
+    ScreenshotsDock   = new ScreenshotsWidget(this);
+    CredentialsDock   = new CredentialsWidget(this);
+    TargetsDock       = new TargetsWidget(this);
 
-    mainStackedWidget->addWidget(SessionsTablePage);
-    mainStackedWidget->addWidget(SessionsGraphPage);
-    mainStackedWidget->addWidget(TasksTab);
-
-    this->SetSessionsTableUI();
-    this->LoadLogsUI();
-
-    profile = authProfile;
+    dockTop->toggleAction()->trigger();
+    this->PlaceDock( dockTop, SessionsTableDock->dock() );
+    dockBottom->toggleAction()->trigger();
+    this->PlaceDock( dockBottom, LogsDock->dock() );
 
     TickThread = new QThread;
     TickWorker = new LastTickWorker( this );
@@ -69,6 +76,7 @@ AdaptixWidget::AdaptixWidget(AuthProfile* authProfile, QThread* channelThread, W
     connect( this, &AdaptixWidget::SyncedSignal, ScriptManager, &AxScriptManager::emitReadyClient);
 
     connect( logsButton,      &QPushButton::clicked, this, &AdaptixWidget::LoadLogsUI);
+    connect( chatButton,      &QPushButton::clicked, this, &AdaptixWidget::LoadChatUI);
     connect( listenersButton, &QPushButton::clicked, this, &AdaptixWidget::LoadListenersUI);
     connect( sessionsButton,  &QPushButton::clicked, this, &AdaptixWidget::SetSessionsTableUI);
     connect( graphButton,     &QPushButton::clicked, this, &AdaptixWidget::SetGraphUI);
@@ -80,16 +88,43 @@ AdaptixWidget::AdaptixWidget(AuthProfile* authProfile, QThread* channelThread, W
     connect( targetsButton,   &QPushButton::clicked, this, &AdaptixWidget::LoadTargetsUI);
     connect( reconnectButton, &QPushButton::clicked, this, &AdaptixWidget::OnReconnect);
 
-    connect( mainTabWidget->tabBar(), &QTabBar::tabCloseRequested, this, &AdaptixWidget::RemoveTab );
-
     connect( TickThread, &QThread::started, TickWorker, &LastTickWorker::run );
+    connect( TickWorker, &LastTickWorker::agentsUpdated, this, [this](const QStringList &agentIds) {
+        SessionsTableDock->agentsModel->updateLastColumn(agentIds);
+    }, Qt::QueuedConnection);
 
+    connect( ChannelWsWorker, &WebSocketWorker::received_json,    this,   &AdaptixWidget::DataHandlerJson );
     connect( ChannelWsWorker, &WebSocketWorker::received_data,    this,   &AdaptixWidget::DataHandler );
     connect( ChannelWsWorker, &WebSocketWorker::websocket_closed, this,   &AdaptixWidget::ChannelClose );
     connect( ChannelWsWorker, &WebSocketWorker::websocket_closed, ScriptManager, &AxScriptManager::emitDisconnectClient );
 
-    dialogSyncPacket = new DialogSyncPacket();
+    dialogSyncPacket = new DialogSyncPacket(this);
+
+    ChannelWsWorker->setHandlerReady();
     dialogSyncPacket->splashScreen->show();
+
+    connect( ChannelWsWorker, &WebSocketWorker::websocket_closed, this, [this]() {
+        if (this->sync && dialogSyncPacket) {
+            dialogSyncPacket->error("Connection lost during synchronization");
+            this->sync = false;
+            this->syncFinishReceived = false;
+            this->pendingPackets.clear();
+            if (pendingPacketsTimer)
+                pendingPacketsTimer->stop();
+            this->setSyncUpdateUI(true);
+        }
+    });
+
+    connect( dialogSyncPacket, &DialogSyncPacket::syncCancelled, this, [this]() {
+        this->sync = false;
+        this->syncFinishReceived = false;
+        this->pendingPackets.clear();
+        if (pendingPacketsTimer)
+            pendingPacketsTimer->stop();
+        this->setSyncUpdateUI(true);
+        if (dialogSyncPacket && dialogSyncPacket->splashScreen)
+            dialogSyncPacket->splashScreen->close();
+    });
 
     TickThread->start();
     ChannelThread->start();
@@ -97,22 +132,139 @@ AdaptixWidget::AdaptixWidget(AuthProfile* authProfile, QThread* channelThread, W
     /// TODO: Enable menu button
     keysButton->setVisible(false);
 
-    HttpReqSync( *profile );
+    QTimer::singleShot(100, this, [this]() {
+        QByteArray jsonData = QJsonDocument(QJsonObject()).toJson();
+        HttpRequestManager::instance().post(profile->GetURL(), "/sync", profile->GetAccessToken(), jsonData, [](bool, const QString&, const QJsonObject&) {});
+    });
 }
 
 AdaptixWidget::~AdaptixWidget() = default;
 
+void AdaptixWidget::finalizeSyncIfReady()
+{
+    if (!this->syncFinishReceived)
+        return;
+    if (!this->pendingPackets.isEmpty())
+        return;
+
+    this->syncFinishReceived = false;
+    this->sync = false;
+
+    if (dialogSyncPacket)
+        dialogSyncPacket->finish();
+
+    if (dialogSyncPacket) {
+        dialogSyncPacket->setPhase("Applying UI updates...", true);
+        if (dialogSyncPacket->splashScreen)
+            dialogSyncPacket->splashScreen->repaint();
+    }
+
+    this->setSyncUpdateUI(true);
+
+    if (dialogSyncPacket && dialogSyncPacket->splashScreen)
+        dialogSyncPacket->splashScreen->close();
+
+    Q_EMIT this->SyncedSignal();
+}
+
+void AdaptixWidget::enqueueSyncPacket(const QJsonObject &jsonObj)
+{
+    pendingPackets.enqueue(jsonObj);
+    if (pendingPacketsTimer && !pendingPacketsTimer->isActive())
+        pendingPacketsTimer->start();
+}
+
+void AdaptixWidget::processPendingSyncPackets()
+{
+    if (!pendingPacketsTimer)
+        return;
+
+    QElapsedTimer timer;
+    timer.start();
+
+    const int timeBudgetMs = this->sync ? 50 : 8;
+
+    while (!pendingPackets.isEmpty()) {
+        if (dialogSyncPacket && dialogSyncPacket->cancelled) {
+            pendingPackets.clear();
+            pendingPacketsTimer->stop();
+            this->syncFinishReceived = false;
+            this->syncTotalBatches = 0;
+            this->syncProcessingBatchIndex = 0;
+            this->syncProcessingBatchTotal = 0;
+            this->syncProcessingBatchProcessed = 0;
+            return;
+        }
+
+        QJsonObject obj = pendingPackets.dequeue();
+
+        if (obj.contains("__ax_batch_marker") && obj.value("__ax_batch_marker").toBool()) {
+            this->syncProcessingBatchIndex++;
+            this->syncProcessingBatchTotal = obj.value("__ax_batch_size").toInt();
+            this->syncProcessingBatchProcessed = 0;
+            if (this->sync && dialogSyncPacket) {
+                dialogSyncPacket->setProcessingProgress(
+                    this->syncProcessingBatchIndex,
+                    this->syncTotalBatches,
+                    this->syncProcessingBatchProcessed,
+                    this->syncProcessingBatchTotal
+                );
+            }
+
+            this->syncProcessingUiTimer.restart();
+        } else {
+            this->processSyncPacket(obj);
+            if (this->sync && this->syncProcessingBatchTotal > 0) {
+                this->syncProcessingBatchProcessed++;
+                bool shouldUpdate = false;
+                if (!this->syncProcessingUiTimer.isValid()) {
+                    shouldUpdate = true;
+                    this->syncProcessingUiTimer.start();
+                } else if (this->syncProcessingUiTimer.elapsed() >= 150) {
+                    shouldUpdate = true;
+                    this->syncProcessingUiTimer.restart();
+                } else if (this->syncProcessingBatchProcessed >= this->syncProcessingBatchTotal) {
+                    shouldUpdate = true;
+                }
+
+                if (shouldUpdate && dialogSyncPacket) {
+                    dialogSyncPacket->setProcessingProgress(
+                        this->syncProcessingBatchIndex,
+                        this->syncTotalBatches,
+                        this->syncProcessingBatchProcessed,
+                        this->syncProcessingBatchTotal
+                    );
+                    QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+                }
+            }
+        }
+
+        if (timer.elapsed() >= timeBudgetMs)
+            break;
+    }
+
+    if (pendingPackets.isEmpty())
+        pendingPacketsTimer->stop();
+
+    finalizeSyncIfReady();
+}
+
 void AdaptixWidget::createUI()
 {
+    logsButton = new QPushButton(QIcon(":/icons/logs"), "", this );
+    logsButton->setIconSize( QSize( 24,24 ));
+    logsButton->setFixedSize(37, 28);
+    logsButton->setToolTip("Notifications");
+
     listenersButton = new QPushButton( QIcon(":/icons/listeners"), "", this );
     listenersButton->setIconSize( QSize( 24,24 ));
     listenersButton->setFixedSize(37, 28);
     listenersButton->setToolTip("Listeners & Sites");
 
-    logsButton = new QPushButton(QIcon(":/icons/logs"), "", this );
-    logsButton->setIconSize( QSize( 24,24 ));
-    logsButton->setFixedSize(37, 28);
-    logsButton->setToolTip("Logs");
+    extDocksButton = new QPushButton(QIcon(":/icons/extension"), "", this);
+    extDocksButton->setIconSize(QSize(24, 24));
+    extDocksButton->setFixedSize(37, 28);
+    extDocksButton->setToolTip("Extensions Docks");
 
     line_1 = new QFrame(this);
     line_1->setFrameShape(QFrame::VLine);
@@ -128,14 +280,19 @@ void AdaptixWidget::createUI()
     graphButton->setFixedSize(37, 28);
     graphButton->setToolTip("Session graph");
 
-    line_2 = new QFrame(this);
-    line_2->setFrameShape(QFrame::VLine);
-    line_2->setMinimumHeight(25);
-
     tasksButton = new QPushButton(QIcon(":/icons/job"), "", this );
     tasksButton->setIconSize(QSize(24, 24 ));
     tasksButton->setFixedSize(37, 28);
     tasksButton->setToolTip("Jobs & Tasks");
+
+    line_2 = new QFrame(this);
+    line_2->setFrameShape(QFrame::VLine);
+    line_2->setMinimumHeight(25);
+
+    chatButton = new QPushButton(QIcon(":/icons/chat"), "", this );
+    chatButton->setIconSize( QSize( 24,24 ));
+    chatButton->setFixedSize(37, 28);
+    chatButton->setToolTip("Chat");
 
     tunnelButton = new QPushButton( QIcon(":/icons/vpn"), "", this );
     tunnelButton->setIconSize( QSize( 24,24 ));
@@ -176,26 +333,58 @@ void AdaptixWidget::createUI()
     line_4->setMinimumHeight(25);
 
     reconnectButton = new QPushButton(QIcon(":/icons/link"), "");
-    reconnectButton->setIconSize( QSize( 24,24 ));
+    reconnectButton->setIconSize(QSize(24,24));
     reconnectButton->setFixedSize(37, 28);
     reconnectButton->setToolTip("Reconnect to C2");
     QIcon onReconnectButton = RecolorIcon(reconnectButton->icon(), COLOR_NeonGreen);
     reconnectButton->setIcon(onReconnectButton);
 
+    extDocksListWidget = new QListWidget();
+    extDocksListWidget->setSelectionMode(QAbstractItemView::SingleSelection);
+    extDocksListWidget->setStyleSheet(
+        "QListWidget::item { padding: 6px 10px; margin: 1px 0px; }"
+    );
+
+    extDocksEmptyLabel = new QLabel("No loaded extenders docks");
+    extDocksEmptyLabel->setAlignment(Qt::AlignCenter);
+    extDocksEmptyLabel->setStyleSheet("color: gray; padding: 20px;");
+
+    auto extDocksLayout = new QVBoxLayout();
+    extDocksLayout->setContentsMargins(8, 8, 8, 8);
+    extDocksLayout->setSpacing(6);
+    extDocksLayout->addWidget(extDocksListWidget);
+    extDocksLayout->addWidget(extDocksEmptyLabel);
+
+    extDocksPopup = new QDialog(this, Qt::Popup | Qt::FramelessWindowHint);
+    extDocksPopup->setLayout(extDocksLayout);
+    extDocksPopup->setProperty("Main", "base");
+    extDocksPopup->setMinimumWidth(250);
+
+    connect(extDocksButton, &QPushButton::clicked, this, &AdaptixWidget::ShowExtDocksPopup);
+    connect(extDocksListWidget, &QListWidget::itemClicked, this, [this](QListWidgetItem* item) {
+        QString id = item->data(Qt::UserRole).toString();
+        if (extDocksMap.contains(id) && extDocksMap[id].showCallback) {
+            extDocksMap[id].showCallback();
+        }
+        extDocksPopup->hide();
+    });
+
     horizontalSpacer1 = new QSpacerItem(40, 20, QSizePolicy::Expanding, QSizePolicy::Minimum);
 
     topHLayout = new QHBoxLayout();
-    topHLayout->setContentsMargins(5, 5, 0, 5);
+    topHLayout->setContentsMargins(5, 5, 0, 1);
     topHLayout->setSpacing(10);
     topHLayout->setAlignment(Qt::AlignLeft);
 
-    topHLayout->addWidget(listenersButton);
     topHLayout->addWidget(logsButton);
+    topHLayout->addWidget(listenersButton);
+    topHLayout->addWidget(extDocksButton);
     topHLayout->addWidget(line_1);
     topHLayout->addWidget(sessionsButton);
     topHLayout->addWidget(graphButton);
     topHLayout->addWidget(tasksButton);
     topHLayout->addWidget(line_2);
+    topHLayout->addWidget(chatButton);
     topHLayout->addWidget(tunnelButton);
     topHLayout->addWidget(line_3);
     topHLayout->addWidget(downloadsButton);
@@ -205,28 +394,24 @@ void AdaptixWidget::createUI()
     topHLayout->addWidget(keysButton);
     topHLayout->addWidget(line_4);
     topHLayout->addWidget(reconnectButton);
+    // topHLayout->addWidget(line_5);
     topHLayout->addItem(horizontalSpacer1);
 
-    mainStackedWidget = new QStackedWidget(this);
+    dockTop = new KDDockWidgets::QtWidgets::DockWidget(this->profile->GetProject()+"-Dock-Top", KDDockWidgets::DockWidgetOption_None, KDDockWidgets::LayoutSaverOption::None);
+    dockTop->setWidget(new QWidget());
 
-    mainTabWidget = new QTabWidget(this);
-    mainTabWidget->setCurrentIndex( 0 );
-    mainTabWidget->setMovable( false );
-    mainTabWidget->setTabsClosable( true );
+    dockBottom = new KDDockWidgets::QtWidgets::DockWidget(this->profile->GetProject()+"-Dock-Bottom", KDDockWidgets::DockWidgetOption_None, KDDockWidgets::LayoutSaverOption::None);
+    dockBottom->setWidget(new QWidget());
 
-    mainVSplitter = new QSplitter(Qt::Vertical, this);
-    mainVSplitter->setContentsMargins(0, 0, 0, 0);
-    mainVSplitter->setHandleWidth(3);
-    mainVSplitter->setVisible(true);
-    mainVSplitter->addWidget(mainStackedWidget);
-    mainVSplitter->addWidget(mainTabWidget);
-    mainVSplitter->setSizes(QList<int>({200, 200}));
+    mainDockWidget = new KDDockWidgets::QtWidgets::MainWindow(this->profile->GetProject()+"-MainDock", KDDockWidgets::MainWindowOption_None);
+    mainDockWidget->addDockWidget(dockTop, KDDockWidgets::Location_OnTop);
+    mainDockWidget->addDockWidget(dockBottom, KDDockWidgets::Location_OnBottom);
 
     mainGridLayout = new QGridLayout(this );
     mainGridLayout->setContentsMargins(0, 0, 0, 0);
     mainGridLayout->setVerticalSpacing(0);
     mainGridLayout->addLayout(topHLayout, 0, 0, 1, 1);
-    mainGridLayout->addWidget(mainVSplitter, 1, 0, 1, 1);
+    mainGridLayout->addWidget(mainDockWidget, 1, 0, 1, 1);
 
     this->setLayout(mainGridLayout);
 }
@@ -235,31 +420,44 @@ void AdaptixWidget::createUI()
 
 AuthProfile* AdaptixWidget::GetProfile() const { return this->profile; }
 
-void AdaptixWidget::AddTab(QWidget *tab, const QString &title, const QString &icon) const
+void AdaptixWidget::PlaceDock(KDDockWidgets::QtWidgets::DockWidget* parentDock, KDDockWidgets::QtWidgets::DockWidget* dock) const
 {
-    if ( mainTabWidget->count() == 0 )
-        mainVSplitter->setSizes(QList<int>() << 100 << 200);
-    else if ( mainTabWidget->count() == 1 )
-        mainTabWidget->setMovable(true);
-
-    int id = mainTabWidget->addTab( tab, title );
-
-    mainTabWidget->setIconSize( QSize( 17, 17 ) );
-    mainTabWidget->setTabIcon(id, QIcon(icon));
-    mainTabWidget->setCurrentIndex( id );
-}
-
-void AdaptixWidget::RemoveTab(const int index) const
-{
-    if (index == -1)
+    if (dock->isOpen()) {
+        dock->setAsCurrentTab();
         return;
+    }
 
-    mainTabWidget->removeTab(index);
+    QString previousFocusedName;
+    QString dockBeingAddedName = dock->uniqueName();
+    KDDockWidgets::Core::Group* parentDockGroup = parentDock->group();
 
-    if (mainTabWidget->count() == 0)
-        mainVSplitter->setSizes(QList<int>() << 0);
-    else if (mainTabWidget->count() == 1)
-        mainTabWidget->setMovable(false);
+    if (KDDockWidgets::DockRegistry::self() && parentDockGroup) {
+        auto* previousFocused = KDDockWidgets::DockRegistry::self()->focusedDockWidget();
+        if (previousFocused)
+            previousFocusedName = previousFocused->uniqueName();
+    }
+
+    parentDock->toggleAction()->trigger();
+    parentDock->addDockWidgetAsTab(dock);
+    parentDock->toggleAction()->trigger();
+
+    if (!previousFocusedName.isEmpty() && previousFocusedName != dockBeingAddedName && parentDockGroup) {
+        QTimer::singleShot(100, [previousFocusedName, dockBeingAddedName]() {
+            if (KDDockWidgets::DockRegistry::self()) {
+                auto* currentFocused = KDDockWidgets::DockRegistry::self()->focusedDockWidget();
+
+                if (currentFocused && currentFocused->uniqueName() == dockBeingAddedName)
+                    return;
+
+                if (currentFocused && currentFocused->uniqueName() != previousFocusedName && currentFocused->uniqueName() != dockBeingAddedName)
+                    return;
+
+                auto* coreDw = KDDockWidgets::DockRegistry::self()->dockByName(previousFocusedName);
+                if (coreDw && !coreDw->isCurrentTab())
+                    coreDw->setAsCurrentTab();
+            }
+        });
+    }
 }
 
 bool AdaptixWidget::AddExtension(ExtensionFile* ext)
@@ -291,32 +489,77 @@ bool AdaptixWidget::IsSynchronized() { return this->synchronized; }
 
 void AdaptixWidget::Close()
 {
-    TickThread->quit();
-    TickThread->wait();
+    if (TickWorker)
+        disconnect(TickWorker, nullptr, this, nullptr);
+
+    if (TickThread) {
+        TickThread->quit();
+        TickThread->wait();
+    }
+
+    delete TickWorker;
+    TickWorker = nullptr;
+
     delete TickThread;
+    TickThread = nullptr;
 
-    ChannelThread->quit();
-    ChannelThread->wait();
+    if (ChannelWsWorker) {
+        disconnect(ChannelWsWorker, nullptr, this, nullptr);
+        disconnect(ChannelWsWorker, nullptr, ScriptManager, nullptr);
+        QMetaObject::invokeMethod(ChannelWsWorker, "stopWorker", Qt::BlockingQueuedConnection);
+    }
+
+    if (ChannelThread) {
+        ChannelThread->quit();
+        ChannelThread->wait();
+    }
+
+    delete ChannelWsWorker;
+    ChannelWsWorker = nullptr;
+
     delete ChannelThread;
-
-    ChannelWsWorker->webSocket->close();
+    ChannelThread = nullptr;
 
     this->ClearAdaptix();
+
+    delete AxConsoleDock;
+    delete LogsDock;
+    delete ChatDock;
+    delete ListenersDock;
+    delete SessionsTableDock;
+    delete SessionsGraphDock;
+    delete TasksDock;
+    delete TunnelsDock;
+    delete DownloadsDock;
+    delete ScreenshotsDock;
+    delete CredentialsDock;
+    delete TargetsDock;
+
+    delete dockTop;
+    delete dockBottom;
+    delete mainDockWidget;
+
+    delete dialogSyncPacket;
+    dialogSyncPacket = nullptr;
+
+    delete profile;
+    profile = nullptr;
 }
 
 void AdaptixWidget::ClearAdaptix()
 {
-    AxConsoleTab->OutputClear();
-    LogsTab->Clear();
-    DownloadsTab->Clear();
-    ScreenshotsTab->Clear();
-    TasksTab->Clear();
-    ListenersTab->Clear();
-    SessionsGraphPage->Clear();
-    SessionsTablePage->Clear();
-    TunnelsTab->Clear();
-    CredentialsTab->Clear();
-    TargetsTab->Clear();
+    AxConsoleDock->OutputClear();
+    LogsDock->Clear();
+    ChatDock->Clear();
+    DownloadsDock->Clear();
+    ScreenshotsDock->Clear();
+    TasksDock->Clear();
+    ListenersDock->Clear();
+    SessionsGraphDock->Clear();
+    SessionsTableDock->Clear();
+    TunnelsDock->Clear();
+    CredentialsDock->Clear();
+    TargetsDock->Clear();
 
     for (auto tunnelId : ClientTunnels.keys()) {
         auto tunnel = ClientTunnels[tunnelId];
@@ -334,6 +577,30 @@ void AdaptixWidget::ClearAdaptix()
     RegisterAgents.clear();
 }
 
+void AdaptixWidget::ClearChatStream()
+{
+    if (ChatDock)
+        ChatDock->Clear();
+}
+
+void AdaptixWidget::ClearConsoleStreams()
+{
+    if (AxConsoleDock)
+        AxConsoleDock->OutputClear();
+
+    QReadLocker locker(&AgentsMapLock);
+    for (const auto agent : AgentsMap.values()) {
+        if (agent && agent->Console)
+            agent->Console->Clear();
+    }
+}
+
+void AdaptixWidget::ClearNotificationsStream()
+{
+    if (LogsDock)
+        LogsDock->Clear();
+}
+
 /// REGISTER
 
 void AdaptixWidget::RegisterListenerConfig(const QString &name, const QString &protocol, const QString &type, const QString &ax_script)
@@ -343,8 +610,15 @@ void AdaptixWidget::RegisterListenerConfig(const QString &name, const QString &p
     RegisterListeners.push_back(config);
 }
 
-void AdaptixWidget::RegisterAgentConfig(const QString &agentName, const QString &ax_script, const QStringList &listeners)
+void AdaptixWidget::RegisterServiceConfig(const QString &serviceName, const QString &ax_script)
 {
+    ScriptManager->ServiceScriptAdd(serviceName, ax_script);
+}
+
+void AdaptixWidget::RegisterAgentConfig(const QString &agentName, const QString &ax_script, const QStringList &listeners, const bool &multiListeners)
+{
+    AgentTypes[agentName] = AgentTypeInfo{multiListeners, listeners};
+
     ScriptManager->AgentScriptAdd(agentName, ax_script);
 
     QJSEngine* engine = ScriptManager->AgentScriptEngine(agentName);
@@ -459,6 +733,11 @@ QList<QString> AdaptixWidget::GetAgentNames(const QString &listenerType) const
     return names.values();
 }
 
+AgentTypeInfo AdaptixWidget::GetAgentTypeInfo(const QString &agentName) const
+{
+    return AgentTypes.value(agentName, AgentTypeInfo{false, QStringList()});
+}
+
 RegAgentConfig AdaptixWidget::GetRegAgent(const QString &agentName, const QString &listenerName, const int os)
 {
     if (os == OS_WINDOWS || os == OS_LINUX || os == OS_MAC) {
@@ -472,6 +751,11 @@ RegAgentConfig AdaptixWidget::GetRegAgent(const QString &agentName, const QStrin
 
         for (auto regAgent : this->RegisterAgents) {
             if (regAgent.name == agentName && regAgent.listenerType == listener && regAgent.os == os)
+                return regAgent;
+        }
+
+        for (auto regAgent : this->RegisterAgents) {
+            if (regAgent.name == agentName && regAgent.os == os)
                 return regAgent;
         }
     }
@@ -508,12 +792,12 @@ void AdaptixWidget::PostHookProcess(QJsonObject jsonHookObj)
     bool completed = jsonHookObj["a_completed"].toBool();
 
     if (PostHooksJS.contains(hookId)) {
-        PostHook post_hooks = PostHooksJS[hookId];
+        AxExecutor post_hooks = PostHooksJS[hookId];
         if (completed)
             PostHooksJS.remove(hookId);
 
         auto jsEngine = ScriptManager->GetEngine(post_hooks.engineName);
-        if (jsEngine && post_hooks.hook.isCallable()) {
+        if (jsEngine && post_hooks.executor.isCallable()) {
 
             int jobIndex = jsonHookObj["a_job_index"].toDouble();
 
@@ -534,7 +818,7 @@ void AdaptixWidget::PostHookProcess(QJsonObject jsonHookObj)
             else
                 obj["type"] = "";
 
-            QJSValue result = post_hooks.hook.call(QJSValueList() << jsEngine->toScriptValue(obj));
+            QJSValue result = post_hooks.executor.call(QJSValueList() << jsEngine->toScriptValue(obj));
             if (result.isObject()) {
                 QJsonObject modifiedObj = result.toVariant().toJsonObject();
 
@@ -559,68 +843,105 @@ void AdaptixWidget::PostHookProcess(QJsonObject jsonHookObj)
 
     QByteArray jsonData = QJsonDocument(jsonHookObj).toJson();
 
-    QString message = "";
-    bool ok = false;
-    bool result = HttpReqTasksHook(jsonData, *profile, &message, &ok);
-    if( !result ) {
-        MessageError("Server is not responding");
-        return;
+    HttpReqTasksHookAsync(jsonData, *profile, [](bool success, const QString &message, const QJsonObject&) {
+        if (!success)
+            MessageError(message);
+    });
+}
+
+void AdaptixWidget::PostHandlerProcess(const QString &handlerId, const TaskData &taskData)
+{
+    if (PostHandlersJS.contains(handlerId)) {
+        AxExecutor post_handler = PostHandlersJS.take(handlerId);
+        auto jsEngine = ScriptManager->GetEngine(post_handler.engineName);
+        if (jsEngine && post_handler.executor.isCallable()) {
+
+            QJsonObject obj;
+            obj["id"]      = taskData.TaskId;
+            obj["agent"]   = taskData.AgentId;
+            obj["cmdline"] = taskData.CommandLine;
+            obj["message"] = taskData.Message;
+            obj["text"]    = taskData.Output;
+
+            int msgType = taskData.MessageType;
+            if (msgType == CONSOLE_OUT_LOCAL_INFO || msgType == CONSOLE_OUT_INFO)
+                obj["type"] = "info";
+            else if (msgType == CONSOLE_OUT_LOCAL_ERROR || msgType == CONSOLE_OUT_ERROR)
+                obj["type"] = "error";
+            else if (msgType == CONSOLE_OUT_LOCAL_SUCCESS || msgType == CONSOLE_OUT_SUCCESS)
+                obj["type"] = "success";
+            else
+                obj["type"] = "";
+
+            post_handler.executor.call(QJSValueList() << jsEngine->toScriptValue(obj));
+        }
     }
-    if (!ok) MessageError(message);
 }
 
 /// SHOW PANELS
 
 void AdaptixWidget::LoadConsoleUI(const QString &AgentId)
 {
+    QReadLocker locker(&AgentsMapLock);
     if( !AgentsMap.contains(AgentId) )
         return;
 
     auto agent = AgentsMap[AgentId];
     if (agent && agent->Console) {
-        auto text = QString("Console [%1]").arg( AgentId );
-        this->AddTab(AgentsMap[AgentId]->Console, text);
-        AgentsMap[AgentId]->Console->InputFocus();
+        locker.unlock();
+        this->PlaceDock(dockBottom, agent->Console->dock() );
+        agent->Console->InputFocus();
     }
-
 }
 
-void AdaptixWidget::LoadTasksOutput() const { this->AddTab(TasksTab->taskOutputConsole, "Task Output", ":/icons/job"); }
+void AdaptixWidget::LoadTasksOutput() const { this->PlaceDock(dockBottom, TasksDock->dockTasksOutput() ); }
 
 void AdaptixWidget::LoadFileBrowserUI(const QString &AgentId)
 {
+    QReadLocker locker(&AgentsMapLock);
     if( !AgentsMap.contains(AgentId) )
         return;
 
     auto agent = AgentsMap[AgentId];
-    if (agent && agent->FileBrowser) {
-        auto text = QString("Files [%1]").arg( AgentId );
-        this->AddTab(AgentsMap[AgentId]->FileBrowser, text);
-    }
+    locker.unlock();
+    if (agent)
+        this->PlaceDock(dockBottom, agent->GetFileBrowser()->dock() );
 }
 
 void AdaptixWidget::LoadProcessBrowserUI(const QString &AgentId)
 {
+    QReadLocker locker(&AgentsMapLock);
     if( !AgentsMap.contains(AgentId) )
         return;
 
     auto agent = AgentsMap[AgentId];
-    if (agent && agent->ProcessBrowser) {
-        auto text = QString("Processes [%1]").arg( AgentId );
-        this->AddTab(AgentsMap[AgentId]->ProcessBrowser, text);
-    }
+    locker.unlock();
+    if (agent)
+        this->PlaceDock(dockBottom, agent->GetProcessBrowser()->dock() );
 }
 
 void AdaptixWidget::LoadTerminalUI(const QString &AgentId)
 {
+    QReadLocker locker(&AgentsMapLock);
     if( !AgentsMap.contains(AgentId) )
         return;
 
     auto agent = AgentsMap[AgentId];
-    if (agent && agent->Terminal) {
-        auto text = QString("Terminal [%1]").arg( AgentId );
-        this->AddTab(AgentsMap[AgentId]->Terminal, text);
-    }
+    locker.unlock();
+    if (agent)
+        this->PlaceDock(dockBottom, agent->GetTerminal()->dock() );
+}
+
+void AdaptixWidget::LoadShellUI(const QString &AgentId)
+{
+    QReadLocker locker(&AgentsMapLock);
+    if( !AgentsMap.contains(AgentId) )
+        return;
+
+    auto agent = AgentsMap[AgentId];
+    locker.unlock();
+    if (agent)
+        this->PlaceDock(dockBottom, agent->GetShell()->dock() );
 }
 
 void AdaptixWidget::ShowTunnelCreator(const QString &AgentId, const bool socks4, const bool socks5, const bool lportfwd, const bool rportfwd)
@@ -646,47 +967,40 @@ void AdaptixWidget::ShowTunnelCreator(const QString &AgentId, const bool socks4,
     QByteArray tunnelData = dialogTunnel->GetTunnelData();
 
     if ( endpoint == "Teamserver" ) {
-        QString message = "";
-        bool ok = false;
-        bool result = HttpReqTunnelStartServer(tunnelType, tunnelData, *profile, &message, &ok);
-        if( !result ) {
-            MessageError("Server is not responding");
+        HttpReqTunnelStartServerAsync(tunnelType, tunnelData, *profile, [dialogTunnel](bool success, const QString &message, const QJsonObject&) {
+            if (!success)
+                MessageError(message);
             delete dialogTunnel;
-            return;
-        }
-        if (!ok) MessageError(message);
+        });
     }
     else {
         auto tunnelEndpoint = new TunnelEndpoint();
         bool started = tunnelEndpoint->StartTunnel(profile, tunnelType, tunnelData);
         if (started) {
-            QString message = "";
-            bool ok = false;
-            bool result = HttpReqTunnelStartServer(tunnelType, tunnelData, *profile, &message, &ok);
-            if( !result ) {
-                MessageError("Server is not responding");
-                delete tunnelEndpoint;
+            QPointer<AdaptixWidget> safeThis = this;
+            HttpReqTunnelStartServerAsync(tunnelType, tunnelData, *profile, [safeThis, tunnelEndpoint, dialogTunnel](bool success, const QString &message, const QJsonObject&) {
+                if (!success) {
+                    MessageError(message);
+                    delete tunnelEndpoint;
+                } else {
+                    QString tunnelId = message;
+                    tunnelEndpoint->SetTunnelId(tunnelId);
+                    if (safeThis) {
+                        safeThis->ClientTunnels[tunnelId] = tunnelEndpoint;
+                    } else {
+                        tunnelEndpoint->Stop();
+                        delete tunnelEndpoint;
+                    }
+                    MessageSuccess("Tunnel " + tunnelId + " started");
+                }
                 delete dialogTunnel;
-                return;
-            }
-
-            if ( !ok ) {
-                MessageError(message);
-                delete tunnelEndpoint;
-                delete dialogTunnel;
-                return;
-            }
-            QString tunnelId = message;
-
-            tunnelEndpoint->SetTunnelId(tunnelId);
-            this->ClientTunnels[tunnelId] = tunnelEndpoint;
-            MessageSuccess("Tunnel " + tunnelId + " started");
+            });
         }
         else {
             delete tunnelEndpoint;
+            delete dialogTunnel;
         }
     }
-    delete dialogTunnel;
 }
 
 /// SLOTS
@@ -700,104 +1014,185 @@ void AdaptixWidget::ChannelClose() const
 
 void AdaptixWidget::DataHandler(const QByteArray &data)
 {
-    QJsonParseError parseError;
-    QJsonDocument jsonDoc = QJsonDocument::fromJson(data, &parseError);
+    LogError("Unexpected non-JSON websocket payload (len=%d).", static_cast<int>(data.size()));
+}
 
-    if ( parseError.error != QJsonParseError::NoError || !jsonDoc.isObject() ) {
-        LogError("Error parsing JSON data: %s", parseError.errorString().toStdString().c_str());
-        return;
-    }
-
-    QJsonObject jsonObj = jsonDoc.object();
-    if( !this->isValidSyncPacket(jsonObj) ) {
-
+void AdaptixWidget::DataHandlerJson(const QJsonObject &jsonObj)
+{
+    if (!this->isValidSyncPacket(jsonObj)) {
         QString msg = "Invalid SyncPacket";
-        if ( jsonObj.contains("type") && jsonObj["type"].isDouble() ) {
+        if (jsonObj.contains("type") && jsonObj["type"].isDouble()) {
             int spType = jsonObj["type"].toDouble();
-            msg.append(": " + QString::number(spType));
+            msg.append(": 0x" + QString::number(spType, 16).toUpper() + " (" + QString::number(spType) + ")");
         }
         LogError(msg.toStdString().c_str());
         return;
     }
 
-    this->processSyncPacket(jsonObj);
+    this->enqueueSyncPacket(jsonObj);
+}
+
+void AdaptixWidget::OnWebSocketConnected()
+{
+    QByteArray jsonData = QJsonDocument(QJsonObject()).toJson();
+    HttpRequestManager::instance().post(profile->GetURL(), "/sync", profile->GetAccessToken(), jsonData, [](bool, const QString&, const QJsonObject&) {});
 }
 
 void AdaptixWidget::OnSynced()
 {
     synchronized = true;
 
-    this->SessionsGraphPage->TreeDraw();
+    QTimer::singleShot(0, this, [this]() {
+        this->SessionsGraphDock->TreeDraw();
+        this->TasksDock->UpdateColumnsSize();
+        this->TasksDock->UpdateFilterComboBoxes();
+        this->SessionsTableDock->UpdateColumnsSize();
+        this->SessionsTableDock->UpdateAgentTypeComboBox();
+        this->CredentialsDock->UpdateColumnsSize();
+        this->CredentialsDock->UpdateFilterComboBoxes();
+        this->TargetsDock->UpdateColumnsSize();
 
-    emit SyncedOnReloadSignal(profile->GetProject());
+        Q_EMIT SyncedOnReloadSignal(profile->GetProject());
+    });
 }
 
-void AdaptixWidget::SetSessionsTableUI() const
-{
-    mainStackedWidget->setCurrentIndex(0);
-    int index = mainTabWidget->indexOf(TasksTab->taskOutputConsole);
-    if (index < 0)
-        return;
+void AdaptixWidget::SetSessionsTableUI() const { this->PlaceDock(dockTop, SessionsTableDock->dock() ); }
 
-    mainTabWidget->removeTab(index);
-}
+void AdaptixWidget::SetGraphUI() const { this->PlaceDock(dockTop, SessionsGraphDock->dock() ); }
 
-void AdaptixWidget::SetGraphUI() const
-{
-    mainStackedWidget->setCurrentIndex(1);
-    int index = mainTabWidget->indexOf(TasksTab->taskOutputConsole);
-    if (index < 0)
-        return;
+void AdaptixWidget::SetTasksUI() const { this->PlaceDock(dockTop, TasksDock->dockTasks() ); }
 
-    mainTabWidget->removeTab(index);
-}
+void AdaptixWidget::LoadAxConsoleUI() const { this->PlaceDock(dockBottom, AxConsoleDock->dock() ); }
 
-void AdaptixWidget::SetTasksUI() const
-{
-    mainStackedWidget->setCurrentIndex(2);
-    this->AddTab(TasksTab->taskOutputConsole, "Task Output", ":/icons/job");
-}
+void AdaptixWidget::LoadLogsUI() const { this->PlaceDock(dockBottom, LogsDock->dock() ); }
 
-void AdaptixWidget::LoadAxConsoleUI() const { this->AddTab(AxConsoleTab, "AxScript Console", ":/icons/code_blocks"); }
+void AdaptixWidget::LoadChatUI() const { this->PlaceDock(dockBottom, ChatDock->dock() ); }
 
-void AdaptixWidget::LoadLogsUI() const { this->AddTab(LogsTab, "Logs", ":/icons/logs"); }
+void AdaptixWidget::LoadListenersUI() const { this->PlaceDock(dockBottom, ListenersDock->dock() ); }
 
-void AdaptixWidget::LoadListenersUI() const { this->AddTab(ListenersTab, "Listeners", ":/icons/listeners"); }
+void AdaptixWidget::LoadTunnelsUI() const { this->PlaceDock(dockBottom, TunnelsDock->dock() ); }
 
-void AdaptixWidget::LoadTunnelsUI() const { this->AddTab(TunnelsTab, "Tunnels", ":/icons/vpn"); }
+void AdaptixWidget::LoadDownloadsUI() const { this->PlaceDock(dockBottom, DownloadsDock->dock() ); }
 
-void AdaptixWidget::LoadDownloadsUI() const { this->AddTab(DownloadsTab, "Downloads", ":/icons/downloads"); }
+void AdaptixWidget::LoadScreenshotsUI() const { this->PlaceDock(dockBottom, ScreenshotsDock->dock() ); }
 
-void AdaptixWidget::LoadScreenshotsUI() const { this->AddTab(ScreenshotsTab, "Screenshots", ":/icons/picture"); }
+void AdaptixWidget::LoadCredentialsUI() const { this->PlaceDock(dockBottom, CredentialsDock->dock() ); }
 
-void AdaptixWidget::LoadCredentialsUI() const { this->AddTab(CredentialsTab, "Credentials", ":/icons/key"); }
-
-void AdaptixWidget::LoadTargetsUI() const { this->AddTab(TargetsTab, "Targets", ":/icons/devices"); }
+void AdaptixWidget::LoadTargetsUI() const { this->PlaceDock(dockBottom, TargetsDock->dock() ); }
 
 void AdaptixWidget::OnReconnect()
 {
     if (ChannelThread->isRunning()) {
-        bool result = HttpReqJwtUpdate(profile);
-        if (!result) {
-            MessageError("Login failure");
-            return;
-        }
+        QThread* workerThread = new QThread();
+        QObject* worker = new QObject();
+        worker->moveToThread(workerThread);
+
+        connect(workerThread, &QThread::started, worker, [=, this]() {
+            bool result = HttpReqJwtUpdate(profile);
+
+            QMetaObject::invokeMethod(this, [=, this]() {
+                if (!result) {
+                    MessageError("Login failure");
+                }
+
+                workerThread->quit();
+                workerThread->wait();
+                worker->deleteLater();
+                workerThread->deleteLater();
+            }, Qt::QueuedConnection);
+        });
+
+        workerThread->start();
     }
     else {
-        bool result = HttpReqLogin(profile);
-        if (!result) {
-            MessageError("Login failure");
-            return;
-        }
+        QThread* workerThread = new QThread();
+        QObject* worker = new QObject();
+        worker->moveToThread(workerThread);
 
-        this->ClearAdaptix();
+        connect(workerThread, &QThread::started, worker, [=, this]() {
+            bool result = HttpReqLogin(profile);
 
-        ChannelThread->start();
+            QMetaObject::invokeMethod(this, [=, this]() {
+                if (!result) {
+                    MessageError("Login failure");
+                    if (dialogSyncPacket && dialogSyncPacket->splashScreen)
+                        dialogSyncPacket->splashScreen->close();
+                } else {
+                    this->ClearAdaptix();
 
-        QIcon onReconnectButton = RecolorIcon(QIcon(":/icons/link"), COLOR_NeonGreen);
-        reconnectButton->setIcon(onReconnectButton);
+                    connect( ChannelWsWorker, &WebSocketWorker::connected, this, &AdaptixWidget::OnWebSocketConnected, Qt::UniqueConnection );
 
-        HttpReqSync( *profile );
+                    ChannelThread->start();
+
+                    QIcon onReconnectButton = RecolorIcon(QIcon(":/icons/link"), COLOR_NeonGreen);
+                    reconnectButton->setIcon(onReconnectButton);
+                }
+
+                workerThread->quit();
+                workerThread->wait();
+                worker->deleteLater();
+                workerThread->deleteLater();
+            }, Qt::QueuedConnection);
+        });
+
+        if (dialogSyncPacket && dialogSyncPacket->splashScreen)
+            dialogSyncPacket->splashScreen->show();
+
+        workerThread->start();
     }
 }
 
+void AdaptixWidget::AddExtDock(const QString &id, const QString &title, const std::function<void()> &showCallback)
+{
+    if (extDocksMap.contains(id))
+        return;
+
+    ExtDockEntry entry;
+    entry.id = id;
+    entry.title = title;
+    entry.showCallback = showCallback;
+    extDocksMap[id] = entry;
+
+    auto* item = new QListWidgetItem(title);
+    item->setData(Qt::UserRole, id);
+    extDocksListWidget->addItem(item);
+
+    extDocksListWidget->setVisible(true);
+    extDocksEmptyLabel->setVisible(false);
+}
+
+void AdaptixWidget::RemoveExtDock(const QString &id)
+{
+    if (!extDocksMap.contains(id))
+        return;
+
+    extDocksMap.remove(id);
+
+    for (int i = 0; i < extDocksListWidget->count(); ++i) {
+        auto* item = extDocksListWidget->item(i);
+        if (item && item->data(Qt::UserRole).toString() == id) {
+            delete extDocksListWidget->takeItem(i);
+            break;
+        }
+    }
+
+    bool empty = extDocksListWidget->count() == 0;
+    extDocksListWidget->setVisible(!empty);
+    extDocksEmptyLabel->setVisible(empty);
+}
+
+void AdaptixWidget::ShowExtDocksPopup()
+{
+    if (!extDocksPopup || !extDocksButton)
+        return;
+
+    bool empty = extDocksListWidget->count() == 0;
+    extDocksListWidget->setVisible(!empty);
+    extDocksEmptyLabel->setVisible(empty);
+
+    QPoint pos = extDocksButton->mapToGlobal(QPoint(0, extDocksButton->height()));
+    extDocksPopup->move(pos);
+    extDocksPopup->show();
+    extDocksPopup->raise();
+    extDocksPopup->activateWindow();
+}

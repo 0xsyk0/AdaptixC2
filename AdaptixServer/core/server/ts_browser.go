@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"strings"
 
 	"github.com/Adaptix-Framework/axc2"
@@ -8,8 +9,14 @@ import (
 
 /// SYNC
 
-func (ts *Teamserver) TsClientGuiDisks(taskData adaptix.TaskData, jsonDrives string) {
-	value, ok := ts.agents.Get(taskData.AgentId)
+func (ts *Teamserver) TsClientGuiDisksWindows(taskData adaptix.TaskData, drives []adaptix.ListingDrivesDataWin) {
+
+	jsonDrives, err := json.Marshal(drives)
+	if err != nil {
+		return
+	}
+
+	value, ok := ts.Agents.Get(taskData.AgentId)
 	if !ok {
 		return
 	}
@@ -21,7 +28,7 @@ func (ts *Teamserver) TsClientGuiDisks(taskData adaptix.TaskData, jsonDrives str
 	}
 	task := value.(adaptix.TaskData)
 
-	if task.Type != TYPE_BROWSER {
+	if task.Type != adaptix.TASK_TYPE_BROWSER {
 		return
 	}
 
@@ -31,12 +38,29 @@ func (ts *Teamserver) TsClientGuiDisks(taskData adaptix.TaskData, jsonDrives str
 		taskData.Message = "Status: OK"
 	}
 
-	packet := CreateSpBrowserDisks(taskData, jsonDrives)
+	packet := CreateSpBrowserDisks(taskData, string(jsonDrives))
 	ts.TsSyncClient(task.Client, packet)
 }
 
+func (ts *Teamserver) TsClientGuiFilesWindows(taskData adaptix.TaskData, path string, files []adaptix.ListingFileDataWin) {
+	jsonFiles, err := json.Marshal(files)
+	if err != nil {
+		return
+	}
+
+	ts.TsClientGuiFiles(taskData, path, string(jsonFiles))
+}
+
+func (ts *Teamserver) TsClientGuiFilesUnix(taskData adaptix.TaskData, path string, files []adaptix.ListingFileDataUnix) {
+	jsonFiles, err := json.Marshal(files)
+	if err != nil {
+		return
+	}
+	ts.TsClientGuiFiles(taskData, path, string(jsonFiles))
+}
+
 func (ts *Teamserver) TsClientGuiFiles(taskData adaptix.TaskData, path string, jsonFiles string) {
-	value, ok := ts.agents.Get(taskData.AgentId)
+	value, ok := ts.Agents.Get(taskData.AgentId)
 	if !ok {
 		return
 	}
@@ -48,7 +72,7 @@ func (ts *Teamserver) TsClientGuiFiles(taskData adaptix.TaskData, path string, j
 	}
 	task := value.(adaptix.TaskData)
 
-	if task.Type != TYPE_BROWSER {
+	if task.Type != adaptix.TASK_TYPE_BROWSER {
 		return
 	}
 
@@ -67,7 +91,7 @@ func (ts *Teamserver) TsClientGuiFiles(taskData adaptix.TaskData, path string, j
 }
 
 func (ts *Teamserver) TsClientGuiFilesStatus(taskData adaptix.TaskData) {
-	value, ok := ts.agents.Get(taskData.AgentId)
+	value, ok := ts.Agents.Get(taskData.AgentId)
 	if !ok {
 		return
 	}
@@ -79,7 +103,7 @@ func (ts *Teamserver) TsClientGuiFilesStatus(taskData adaptix.TaskData) {
 	}
 	task := value.(adaptix.TaskData)
 
-	if task.Type != TYPE_BROWSER {
+	if task.Type != adaptix.TASK_TYPE_BROWSER {
 		return
 	}
 
@@ -89,8 +113,26 @@ func (ts *Teamserver) TsClientGuiFilesStatus(taskData adaptix.TaskData) {
 	ts.TsSyncClient(task.Client, packet)
 }
 
+func (ts *Teamserver) TsClientGuiProcessWindows(taskData adaptix.TaskData, process []adaptix.ListingProcessDataWin) {
+	jsonProcess, err := json.Marshal(process)
+	if err != nil {
+		return
+	}
+
+	ts.TsClientGuiProcess(taskData, string(jsonProcess))
+}
+
+func (ts *Teamserver) TsClientGuiProcessUnix(taskData adaptix.TaskData, process []adaptix.ListingProcessDataUnix) {
+	jsonProcess, err := json.Marshal(process)
+	if err != nil {
+		return
+	}
+
+	ts.TsClientGuiProcess(taskData, string(jsonProcess))
+}
+
 func (ts *Teamserver) TsClientGuiProcess(taskData adaptix.TaskData, jsonFiles string) {
-	value, ok := ts.agents.Get(taskData.AgentId)
+	value, ok := ts.Agents.Get(taskData.AgentId)
 	if !ok {
 		return
 	}
@@ -102,7 +144,7 @@ func (ts *Teamserver) TsClientGuiProcess(taskData adaptix.TaskData, jsonFiles st
 	}
 	task := value.(adaptix.TaskData)
 
-	if task.Type != TYPE_BROWSER {
+	if task.Type != adaptix.TASK_TYPE_BROWSER {
 		return
 	}
 

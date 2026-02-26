@@ -8,6 +8,16 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+func (tc *TsConnector) TcListenerList(ctx *gin.Context) {
+	jsonListeners, err := tc.teamserver.TsListenerList()
+	if err != nil {
+		ctx.JSON(http.StatusOK, gin.H{"message": err.Error(), "ok": false})
+		return
+	}
+
+	ctx.Data(http.StatusOK, "application/json; charset=utf-8", []byte(jsonListeners))
+}
+
 type ListenerConfig struct {
 	ListenerName string `json:"name"`
 	ConfigType   string `json:"type"`
@@ -15,23 +25,19 @@ type ListenerConfig struct {
 }
 
 func (tc *TsConnector) TcListenerStart(ctx *gin.Context) {
-	var (
-		listener ListenerConfig
-		err      error
-	)
-
-	err = ctx.ShouldBindJSON(&listener)
+	var listener ListenerConfig
+	err := ctx.ShouldBindJSON(&listener)
 	if err != nil {
 		_ = ctx.Error(errors.New("invalid listener"))
 		return
 	}
 
 	if isvalid.ValidListenerName(listener.ListenerName) == false {
-		ctx.JSON(http.StatusOK, gin.H{"message": "Invalid JSON name", "ok": false})
+		ctx.JSON(http.StatusOK, gin.H{"message": "Invalid listener name", "ok": false})
 		return
 	}
 
-	err = tc.teamserver.TsListenerStart(listener.ListenerName, listener.ConfigType, listener.Config, "", nil)
+	err = tc.teamserver.TsListenerStart(listener.ListenerName, listener.ConfigType, listener.Config, 0, "", nil)
 	if err != nil {
 		ctx.JSON(http.StatusOK, gin.H{"message": err.Error(), "ok": false})
 		return
@@ -41,12 +47,8 @@ func (tc *TsConnector) TcListenerStart(ctx *gin.Context) {
 }
 
 func (tc *TsConnector) TcListenerStop(ctx *gin.Context) {
-	var (
-		listener ListenerConfig
-		err      error
-	)
-
-	err = ctx.ShouldBindJSON(&listener)
+	var listener ListenerConfig
+	err := ctx.ShouldBindJSON(&listener)
 	if err != nil {
 		_ = ctx.Error(errors.New("invalid listener"))
 		return
@@ -62,12 +64,8 @@ func (tc *TsConnector) TcListenerStop(ctx *gin.Context) {
 }
 
 func (tc *TsConnector) TcListenerEdit(ctx *gin.Context) {
-	var (
-		listener ListenerConfig
-		err      error
-	)
-
-	err = ctx.ShouldBindJSON(&listener)
+	var listener ListenerConfig
+	err := ctx.ShouldBindJSON(&listener)
 	if err != nil {
 		_ = ctx.Error(errors.New("invalid listener"))
 		return
@@ -80,4 +78,38 @@ func (tc *TsConnector) TcListenerEdit(ctx *gin.Context) {
 	}
 
 	ctx.JSON(http.StatusOK, gin.H{"message": "Listener Edited", "ok": true})
+}
+
+func (tc *TsConnector) TcListenerPause(ctx *gin.Context) {
+	var listener ListenerConfig
+	err := ctx.ShouldBindJSON(&listener)
+	if err != nil {
+		_ = ctx.Error(errors.New("invalid listener"))
+		return
+	}
+
+	err = tc.teamserver.TsListenerPause(listener.ListenerName, listener.ConfigType)
+	if err != nil {
+		ctx.JSON(http.StatusOK, gin.H{"message": err.Error(), "ok": false})
+		return
+	}
+
+	ctx.JSON(http.StatusOK, gin.H{"message": "Listener paused", "ok": true})
+}
+
+func (tc *TsConnector) TcListenerResume(ctx *gin.Context) {
+	var listener ListenerConfig
+	err := ctx.ShouldBindJSON(&listener)
+	if err != nil {
+		_ = ctx.Error(errors.New("invalid listener"))
+		return
+	}
+
+	err = tc.teamserver.TsListenerResume(listener.ListenerName, listener.ConfigType)
+	if err != nil {
+		ctx.JSON(http.StatusOK, gin.H{"message": err.Error(), "ok": false})
+		return
+	}
+
+	ctx.JSON(http.StatusOK, gin.H{"message": "Listener resumed", "ok": true})
 }

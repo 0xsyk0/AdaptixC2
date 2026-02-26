@@ -1,18 +1,44 @@
 #include <Client/AxScript/BridgeForm.h>
 #include <Client/AxScript/AxElementWrappers.h>
 #include <Client/AxScript/AxScriptEngine.h>
+#include <Client/AxScript/AxScriptManager.h>
+#include <Client/AxScript/AxUiFactory.h>
+
 #include <QMessageBox>
 #include <QMetaMethod>
 #include <QJsonDocument>
+#include <QThread>
+#include <QApplication>
 
-BridgeForm::BridgeForm(AxScriptEngine* scriptEngine, QObject* parent) : QObject(parent), scriptEngine(scriptEngine), widget(new QWidget()) {}
 
-BridgeForm::~BridgeForm() { delete widget; }
+
+BridgeForm::BridgeForm(AxScriptEngine* scriptEngine, QObject* parent) : QObject(parent), scriptEngine(scriptEngine), uiFactory(nullptr), localParentWidget(nullptr)
+{
+    if (scriptEngine && scriptEngine->manager()) {
+        uiFactory = scriptEngine->manager()->GetUiFactory();
+    }
+    if (!uiFactory) {
+        localParentWidget = new QWidget();
+    }
+}
+
+BridgeForm::~BridgeForm()
+{
+    delete localParentWidget;
+}
+
+QWidget* BridgeForm::getParentWidget() const
+{
+    if (uiFactory) {
+        return uiFactory->getParentWidget();
+    }
+    return localParentWidget;
+}
 
 void BridgeForm::connect(QObject* sender, const QString& signalName, const QJSValue& handler)
 {
     if (!sender || !handler.isCallable()) {
-        emit scriptError("connect -> Invalid sender or handler");
+        Q_EMIT scriptError("connect -> Invalid sender or handler");
         return;
     }
 
@@ -50,17 +76,17 @@ void BridgeForm::connect(QObject* sender, const QString& signalName, const QJSVa
                 connected = QObject::connect(sender, method, proxy, proxy->metaObject()->method(proxy->metaObject()->indexOfSlot("callWithArgs(int,int)")));
         }
         else {
-            emit scriptError("connect -> Signal " + signalName + " has too many parameters (not supported)");
+            Q_EMIT scriptError("connect -> Signal " + signalName + " has too many parameters (not supported)");
             return;
         }
 
         if (!connected)
-            emit scriptError("connect -> Failed to connect signal " + method.methodSignature());
+            Q_EMIT scriptError("connect -> Failed to connect signal " + method.methodSignature());
 
         return;
     }
 
-    emit scriptError("connect -> Signal " + signalName + " not found");
+    Q_EMIT scriptError("connect -> Signal " + signalName + " not found");
 }
 
 /// Elements
@@ -116,7 +142,7 @@ QObject* BridgeForm::create_hspacer()
 
 QObject* BridgeForm::create_label(const QString& text)
 {
-    auto* label = new QLabel(text, widget);
+    auto* label = new QLabel(text, getParentWidget());
     auto* wrapper = new AxLabelWrapper(label, this);
     scriptEngine->registerObject(wrapper);
     return wrapper;
@@ -124,7 +150,7 @@ QObject* BridgeForm::create_label(const QString& text)
 
 QObject* BridgeForm::create_textline(const QString &text)
 {
-    auto* edit = new QLineEdit(text, widget);
+    auto* edit = new QLineEdit(text, getParentWidget());
     auto* wrapper = new AxTextLineWrapper(edit, this);
     scriptEngine->registerObject(wrapper);
     return wrapper;
@@ -132,7 +158,7 @@ QObject* BridgeForm::create_textline(const QString &text)
 
 QObject* BridgeForm::create_combo()
 {
-    auto* combo = new QComboBox(widget);
+    auto* combo = new QComboBox(getParentWidget());
     auto* wrapper = new AxComboBoxWrapper(combo, this);
     scriptEngine->registerObject(wrapper);
     return wrapper;
@@ -140,7 +166,7 @@ QObject* BridgeForm::create_combo()
 
 QObject* BridgeForm::create_check(const QString& label)
 {
-    auto* check = new QCheckBox(label, widget);
+    auto* check = new QCheckBox(label, getParentWidget());
     auto* wrapper = new AxCheckBoxWrapper(check, this);
     scriptEngine->registerObject(wrapper);
     return wrapper;
@@ -148,7 +174,7 @@ QObject* BridgeForm::create_check(const QString& label)
 
 QObject* BridgeForm::create_spin()
 {
-    auto* spin = new QSpinBox(widget);
+    auto* spin = new QSpinBox(getParentWidget());
     auto* wrapper = new AxSpinBoxWrapper(spin, this);
     scriptEngine->registerObject(wrapper);
     return wrapper;
@@ -156,7 +182,7 @@ QObject* BridgeForm::create_spin()
 
 QObject* BridgeForm::create_dateline(const QString& format)
 {
-    auto* date_widget = new QDateEdit(widget);
+    auto* date_widget = new QDateEdit(getParentWidget());
     auto* wrapper = new AxDateEditWrapper(date_widget, format, this);
     scriptEngine->registerObject(wrapper);
     return wrapper;
@@ -164,7 +190,7 @@ QObject* BridgeForm::create_dateline(const QString& format)
 
 QObject* BridgeForm::create_timeline(const QString& format)
 {
-    auto* time_widget = new QTimeEdit(widget);
+    auto* time_widget = new QTimeEdit(getParentWidget());
     auto* wrapper = new AxTimeEditWrapper(time_widget, format, this);
     scriptEngine->registerObject(wrapper);
     return wrapper;
@@ -172,7 +198,7 @@ QObject* BridgeForm::create_timeline(const QString& format)
 
 QObject* BridgeForm::create_button(const QString& text)
 {
-    auto* btn = new QPushButton(text, widget);
+    auto* btn = new QPushButton(text, getParentWidget());
     auto* wrapper = new AxButtonWrapper(btn, this);
     scriptEngine->registerObject(wrapper);
     return wrapper;
@@ -180,7 +206,7 @@ QObject* BridgeForm::create_button(const QString& text)
 
 QObject* BridgeForm::create_textmulti(const QString& text)
 {
-    auto* textEdit = new QPlainTextEdit(text, widget);
+    auto* textEdit = new QPlainTextEdit(text, getParentWidget());
     auto* wrapper = new AxTextMultiWrapper(textEdit, this);
     scriptEngine->registerObject(wrapper);
     return wrapper;
@@ -188,7 +214,7 @@ QObject* BridgeForm::create_textmulti(const QString& text)
 
 QObject* BridgeForm::create_list()
 {
-    auto* list = new QListWidget(widget);
+    auto* list = new QListWidget(getParentWidget());
     auto* wrapper = new AxListWidgetWrapper(list, scriptEngine->engine(), this);
     scriptEngine->registerObject(wrapper);
     return wrapper;
@@ -196,7 +222,7 @@ QObject* BridgeForm::create_list()
 
 QObject* BridgeForm::create_table(const QJSValue &headers)
 {
-    auto* table = new QTableWidget(widget);
+    auto* table = new QTableWidget(getParentWidget());
     auto* wrapper = new AxTableWidgetWrapper(headers, table, scriptEngine->engine(), this);
     scriptEngine->registerObject(wrapper);
     return wrapper;
@@ -204,15 +230,15 @@ QObject* BridgeForm::create_table(const QJSValue &headers)
 
 QObject* BridgeForm::create_selector_file()
 {
-    auto fileSelector = new FileSelector(widget);
-    auto* wrapper = new AxSelectorFile(fileSelector, this);
+    auto* lineEdit = new QLineEdit(getParentWidget());
+    auto* wrapper = new AxSelectorFile(lineEdit, this);
     scriptEngine->registerObject(wrapper);
     return wrapper;
 }
 
 QObject* BridgeForm::create_tabs()
 {
-    auto* tabWidget = new QTabWidget(widget);
+    auto* tabWidget = new QTabWidget(getParentWidget());
     auto* wrapper = new AxTabWrapper(tabWidget, this);
     scriptEngine->registerObject(wrapper);
     return wrapper;
@@ -220,7 +246,7 @@ QObject* BridgeForm::create_tabs()
 
 QObject* BridgeForm::create_groupbox(const QString &title, const bool checkable)
 {
-    auto* box = new QGroupBox(title, widget);
+    auto* box = new QGroupBox(title, getParentWidget());
     auto* wrapper = new AxGroupBoxWrapper(checkable, box, this);
     scriptEngine->registerObject(wrapper);
     return wrapper;
@@ -228,7 +254,7 @@ QObject* BridgeForm::create_groupbox(const QString &title, const bool checkable)
 
 QObject* BridgeForm::create_hsplitter()
 {
-    auto* splitter = new QSplitter(Qt::Horizontal, widget);
+    auto* splitter = new QSplitter(Qt::Horizontal, getParentWidget());
     auto* wrapper = new AxSplitterWrapper(splitter, this);
     scriptEngine->registerObject(wrapper);
     return wrapper;
@@ -236,7 +262,7 @@ QObject* BridgeForm::create_hsplitter()
 
 QObject* BridgeForm::create_vsplitter()
 {
-    auto* splitter = new QSplitter(Qt::Vertical, widget);
+    auto* splitter = new QSplitter(Qt::Vertical, getParentWidget());
     auto* wrapper = new AxSplitterWrapper(splitter, this);
     scriptEngine->registerObject(wrapper);
     return wrapper;
@@ -244,7 +270,7 @@ QObject* BridgeForm::create_vsplitter()
 
 QObject* BridgeForm::create_scrollarea()
 {
-    auto* area = new QScrollArea(widget);
+    auto* area = new QScrollArea(getParentWidget());
     auto* wrapper = new AxScrollAreaWrapper(area, this);
     scriptEngine->registerObject(wrapper);
     return wrapper;
@@ -252,7 +278,8 @@ QObject* BridgeForm::create_scrollarea()
 
 QObject* BridgeForm::create_panel()
 {
-    auto* panel = new QWidget(widget);
+    auto* panel = new QWidget(getParentWidget());
+    panel->setProperty("Main", "base");
     auto* wrapper = new AxPanelWrapper(panel, this);
     scriptEngine->registerObject(wrapper);
     return wrapper;
@@ -260,7 +287,7 @@ QObject* BridgeForm::create_panel()
 
 QObject* BridgeForm::create_stack()
 {
-    auto* stack = new QStackedWidget(widget);
+    auto* stack = new QStackedWidget(getParentWidget());
     auto* wrapper = new AxStackedWidgetWrapper(stack, this);
     scriptEngine->registerObject(wrapper);
     return wrapper;
@@ -275,25 +302,65 @@ QObject* BridgeForm::create_container()
 
 QObject* BridgeForm::create_dialog(const QString& title) const
 {
-    auto* wrapper = new AxDialogWrapper(title, widget);
+    auto* wrapper = new AxDialogWrapper(title, getParentWidget());
     scriptEngine->registerObject(wrapper);
     return wrapper;
 }
 
 QObject* BridgeForm::create_selector_credentials(const QJSValue &headers) const
 {
-    auto* table = new QTableWidget(widget);
-    auto* button = new QPushButton(widget);
-    auto* wrapper = new AxSelectorCreds(headers, table, button, scriptEngine, widget);
+    auto* parentW = getParentWidget();
+    auto* wrapper = new AxSelectorCreds(headers, scriptEngine, parentW);
     scriptEngine->registerObject(wrapper);
     return wrapper;
 }
 
-QObject * BridgeForm::create_selector_agents(const QJSValue &headers) const
+QObject* BridgeForm::create_selector_agents(const QJSValue &headers) const
 {
-    auto* table = new QTableWidget(widget);
-    auto* button = new QPushButton(widget);
-    auto* wrapper = new AxSelectorAgents(headers, table, button, scriptEngine, widget);
+    auto* parentW = getParentWidget();
+    auto* wrapper = new AxSelectorAgents(headers, scriptEngine, parentW);
+    scriptEngine->registerObject(wrapper);
+    return wrapper;
+}
+
+QObject* BridgeForm::create_selector_listeners(const QJSValue &headers) const
+{
+    auto* parentW = getParentWidget();
+    auto* wrapper = new AxSelectorListeners(headers, scriptEngine, parentW);
+    scriptEngine->registerObject(wrapper);
+    return wrapper;
+}
+
+QObject* BridgeForm::create_selector_targets(const QJSValue &headers) const
+{
+    auto* parentW = getParentWidget();
+    auto* wrapper = new AxSelectorTargets(headers, scriptEngine, parentW);
+    scriptEngine->registerObject(wrapper);
+    return wrapper;
+}
+
+QObject* BridgeForm::create_selector_downloads(const QJSValue &headers) const
+{
+    auto* parentW = getParentWidget();
+    auto* wrapper = new AxSelectorDownloads(headers, scriptEngine, parentW);
+    scriptEngine->registerObject(wrapper);
+    return wrapper;
+}
+
+QObject* BridgeForm::create_ext_dock(const QString &id, const QString &title, const QString &location)
+{
+    AdaptixWidget* adaptixWidget = scriptEngine->manager()->GetAdaptix();
+
+    auto* wrapper = new AxDockWrapper(adaptixWidget, id, title, location);
+    scriptEngine->registerObject(wrapper);
+    return wrapper;
+}
+
+QObject* BridgeForm::create_ext_dialog(const QString &title)
+{
+    AdaptixWidget* adaptixWidget = scriptEngine->manager()->GetAdaptix();
+
+    auto* wrapper = new AxExtDialogWrapper(adaptixWidget, title);
     scriptEngine->registerObject(wrapper);
     return wrapper;
 }

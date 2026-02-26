@@ -5,11 +5,13 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
+
 	adaptix "github.com/Adaptix-Framework/axc2"
 )
 
 func (dbms *DBMS) DbTargetExist(targetId string) bool {
-	rows, err := dbms.database.Query("SELECT TargetId FROM Targets;")
+	rows, err := dbms.database.Query("SELECT TargetId FROM Targets WHERE TargetId = ?;", targetId)
 	if err != nil {
 		return false
 	}
@@ -17,32 +19,25 @@ func (dbms *DBMS) DbTargetExist(targetId string) bool {
 		_ = rows.Close()
 	}(rows)
 
-	for rows.Next() {
-		rowTargetId := ""
-		_ = rows.Scan(&rowTargetId)
-		if targetId == rowTargetId {
-			return true
-		}
-	}
-	return false
+	return rows.Next()
 }
 
 func (dbms *DBMS) DbTargetsAdd(targetsData []*adaptix.TargetData) error {
 	ok := dbms.DatabaseExists()
 	if !ok {
-		return errors.New("database not exists")
+		return errors.New("database does not exist")
 	}
 
 	for _, targetData := range targetsData {
 		ok = dbms.DbTargetExist(targetData.TargetId)
 		if ok {
-			logs.Error("", "target %s alredy exists", targetData.TargetId)
+			logs.Error("", "target %s already exists", targetData.TargetId)
 			continue
 		}
 
-		insertQuery := `INSERT INTO Targets (TargetId, Computer, Domain, Address, Os, OsDesk, Tag, Info, Date, Alive, Owned) values(?,?,?,?,?,?,?,?,?,?,?);`
+		insertQuery := `INSERT INTO Targets (TargetId, Computer, Domain, Address, Os, OsDesk, Tag, Info, Date, Alive, Agents) values(?,?,?,?,?,?,?,?,?,?,?);`
 		_, err := dbms.database.Exec(insertQuery, targetData.TargetId, targetData.Computer, targetData.Domain, targetData.Address, targetData.Os,
-			targetData.OsDesk, targetData.Tag, targetData.Info, targetData.Date, targetData.Alive, targetData.Owned)
+			targetData.OsDesk, targetData.Tag, targetData.Info, targetData.Date, targetData.Alive, strings.Join(targetData.Agents, ","))
 		if err != nil {
 			logs.Error("", err.Error())
 			continue
@@ -56,29 +51,24 @@ func (dbms *DBMS) DbTargetUpdate(targetData *adaptix.TargetData) error {
 
 	ok := dbms.DatabaseExists()
 	if !ok {
-		return errors.New("database not exists")
+		return errors.New("database does not exist")
 	}
 
 	ok = dbms.DbTargetExist(targetData.TargetId)
 	if !ok {
-		return fmt.Errorf("target %s not exists", targetData.TargetId)
+		return fmt.Errorf("target %s does not exist", targetData.TargetId)
 	}
 
-	updateQuery := `UPDATE Targets SET Computer = ?, Domain = ?, Address = ?, Os = ?, OsDesk = ?, Tag = ?, Info = ?, Alive = ?, Owned = ? WHERE TargetId = ?;`
+	updateQuery := `UPDATE Targets SET Computer = ?, Domain = ?, Address = ?, Os = ?, OsDesk = ?, Tag = ?, Info = ?, Alive = ?, Agents = ? WHERE TargetId = ?;`
 	_, err := dbms.database.Exec(updateQuery, targetData.Computer, targetData.Domain, targetData.Address, targetData.Os,
-		targetData.OsDesk, targetData.Tag, targetData.Info, targetData.Alive, targetData.Owned, targetData.TargetId)
+		targetData.OsDesk, targetData.Tag, targetData.Info, targetData.Alive, strings.Join(targetData.Agents, ","), targetData.TargetId)
 	return err
 }
 
 func (dbms *DBMS) DbTargetDelete(targetId string) error {
 	ok := dbms.DatabaseExists()
 	if !ok {
-		return errors.New("database not exists")
-	}
-
-	ok = dbms.DbTargetExist(targetId)
-	if !ok {
-		return fmt.Errorf("target %s not exists", targetId)
+		return errors.New("database does not exist")
 	}
 
 	deleteQuery := `DELETE FROM Targets WHERE TargetId = ?;`
@@ -86,29 +76,94 @@ func (dbms *DBMS) DbTargetDelete(targetId string) error {
 	return err
 }
 
+func (dbms *DBMS) DbTargetDeleteBatch(targetIds []string) error {
+	if len(targetIds) == 0 {
+		return nil
+	}
+
+	ok := dbms.DatabaseExists()
+	if !ok {
+		return errors.New("database does not exist")
+	}
+
+	placeholders := make([]string, len(targetIds))
+	args := make([]interface{}, len(targetIds))
+	for i, id := range targetIds {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+
+	deleteQuery := fmt.Sprintf("DELETE FROM Targets WHERE TargetId IN (%s);",
+		strings.Join(placeholders, ","))
+	_, err := dbms.database.Exec(deleteQuery, args...)
+	return err
+}
+
+func (dbms *DBMS) DbTargetUpdateBatch(targets []*adaptix.TargetData) error {
+	if len(targets) == 0 {
+		return nil
+	}
+
+	ok := dbms.DatabaseExists()
+	if !ok {
+		return errors.New("database does not exist")
+	}
+
+	tx, err := dbms.database.Begin()
+	if err != nil {
+		return err
+	}
+
+	updateQuery := `UPDATE Targets SET Computer = ?, Domain = ?, Address = ?, Os = ?, OsDesk = ?, Tag = ?, Info = ?, Alive = ?, Agents = ? WHERE TargetId = ?;`
+	stmt, err := tx.Prepare(updateQuery)
+	if err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	defer func(stmt *sql.Stmt) {
+		_ = stmt.Close()
+	}(stmt)
+
+	for _, t := range targets {
+		_, err = stmt.Exec(t.Computer, t.Domain, t.Address, t.Os, t.OsDesk, t.Tag, t.Info, t.Alive, strings.Join(t.Agents, ","), t.TargetId)
+		if err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
 func (dbms *DBMS) DbTargetsAll() []*adaptix.TargetData {
 	var targets []*adaptix.TargetData
 
 	ok := dbms.DatabaseExists()
 	if ok {
-		selectQuery := `SELECT TargetId, Computer, Domain, Address, Os, OsDesk, Tag, Info, Date, Alive, Owned FROM Targets;`
+		selectQuery := `SELECT TargetId, Computer, Domain, Address, Os, OsDesk, Tag, Info, Date, Alive, Agents FROM Targets;`
 		query, err := dbms.database.Query(selectQuery)
-		if err == nil {
-			for query.Next() {
-				targetData := &adaptix.TargetData{}
-				err = query.Scan(&targetData.TargetId, &targetData.Computer, &targetData.Domain, &targetData.Address, &targetData.Os,
-					&targetData.OsDesk, &targetData.Tag, &targetData.Info, &targetData.Date, &targetData.Alive, &targetData.Owned)
-				if err != nil {
-					continue
-				}
-				targets = append(targets, targetData)
-			}
-		} else {
-			logs.Debug("", err.Error()+" --- Clear database file!")
+		if err != nil {
+			logs.Debug("", "Failed to query targets: "+err.Error())
+			return targets
 		}
 		defer func(query *sql.Rows) {
 			_ = query.Close()
 		}(query)
+
+		for query.Next() {
+			targetData := &adaptix.TargetData{}
+			agentsStr := ""
+			err = query.Scan(&targetData.TargetId, &targetData.Computer, &targetData.Domain, &targetData.Address, &targetData.Os,
+				&targetData.OsDesk, &targetData.Tag, &targetData.Info, &targetData.Date, &targetData.Alive, &agentsStr)
+			if err != nil {
+				continue
+			}
+			if agentsStr != "" {
+				targetData.Agents = strings.Split(agentsStr, ",")
+			}
+
+			targets = append(targets, targetData)
+		}
 	}
 	return targets
 }

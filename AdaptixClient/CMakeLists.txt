@@ -1,9 +1,12 @@
-cmake_minimum_required(VERSION 3.28)
+cmake_minimum_required(VERSION 3.28) # 3.15
 project(AdaptixClient LANGUAGES C CXX)
 
-set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+add_subdirectory(Libs/kddockwidgets)
 
 if(UNIX)
     find_package( OpenSSL REQUIRED )
@@ -28,6 +31,10 @@ include_directories(
         Headers
         Libs
 )
+
+### KDDOCKWIDGETS
+
+set(KDDOCKWIDGETS_RESOURCES Libs/kddockwidgets/kddockwidgets_resources.qrc)
 
 ### KONSOLE
 
@@ -89,6 +96,7 @@ SET( HEADERS
         Headers/Client/AuthProfile.h
         Headers/Utils/FileSystem.h
         Headers/Client/Requestor.h
+        Headers/Client/HttpRequestManager.h
         Headers/UI/MainUI.h
         Headers/UI/Widgets/AdaptixWidget.h
         Headers/UI/Widgets/LogsWidget.h
@@ -100,7 +108,6 @@ SET( HEADERS
         Headers/UI/Dialogs/DialogAgent.h
         Headers/UI/Widgets/ConsoleWidget.h
         Headers/Agent/Agent.h
-        Headers/Agent/AgentTableWidgetItem.h
         Headers/Workers/LastTickWorker.h
         Headers/Agent/Commander.h
         Headers/UI/Widgets/DownloadsWidget.h
@@ -114,25 +121,28 @@ SET( HEADERS
         Headers/Client/Settings.h
         Headers/UI/Widgets/TunnelsWidget.h
         Headers/Utils/KeyPressHandler.h
-        Headers/Agent/Task.h
-        Headers/Agent/TaskTableWidgetItem.h
         Headers/UI/Graph/SessionsGraph.h
         Headers/UI/Graph/GraphItem.h
         Headers/UI/Graph/GraphItemLink.h
         Headers/UI/Graph/GraphScene.h
         Headers/UI/Graph/LayoutTreeLeft.h
+        Headers/UI/Graph/LayoutTreeTop.h
         Headers/UI/Widgets/ScreenshotsWidget.h
         Headers/UI/Dialogs/DialogTunnel.h
         Headers/Client/TunnelEndpoint.h
         Headers/Workers/TunnelWorker.h
-        Headers/UI/Widgets/TerminalWidget.h
+        Headers/Workers/SocksHandshakeWorker.h
+        Headers/UI/Widgets/TerminalContainerWidget.h
         Headers/Workers/TerminalWorker.h
+        Headers/Workers/BuildWorker.h
         Headers/UI/Dialogs/DialogDownloader.h
         Headers/Workers/DownloaderWorker.h
         Headers/Workers/UploaderWorker.h
         Headers/UI/Dialogs/DialogUploader.h
         Headers/Client/AxScript/AxScriptManager.h
         Headers/Client/AxScript/AxScriptEngine.h
+        Headers/Client/AxScript/AxScriptWorker.h
+        Headers/Client/AxScript/AxUiFactory.h
         Headers/Client/AxScript/BridgeApp.h
         Headers/Client/AxScript/BridgeEvent.h
         Headers/Client/AxScript/BridgeForm.h
@@ -143,11 +153,21 @@ SET( HEADERS
         Headers/UI/Dialogs/DialogCredential.h
         Headers/UI/Widgets/AxConsoleWidget.h
         Headers/UI/Dialogs/DialogTarget.h
+        Headers/UI/Dialogs/DialogSaveTask.h
+        Headers/UI/Widgets/ChatWidget.h
+        Headers/UI/Widgets/AbstractDock.h
+        Headers/Utils/NonBlockingDialogs.h
+        Headers/UI/Dialogs/DialogSubscriptions.h
+        Headers/Utils/FontManager.h
+        Headers/Utils/TitleBarStyle.h
+        Headers/UI/Widgets/DockWidgetRegister.h
 )
 
 add_executable(AdaptixClient
         ${KONSOLE_SOURCES}
         ${KONSOLE_HEADERS}
+
+        ${KDDOCKWIDGETS_RESOURCES}
 
         ${HEADERS}
 
@@ -157,12 +177,14 @@ add_executable(AdaptixClient
 
         Source/Utils/Logs.cpp
         Source/UI/Dialogs/DialogConnect.cpp
+        Source/UI/Dialogs/DialogSubscriptions.cpp
         Source/Utils/Convert.cpp
         Source/MainAdaptix.cpp
         Source/Client/Storage.cpp
         Source/Client/AuthProfile.cpp
         Source/Utils/FileSystem.cpp
         Source/Client/Requestor.cpp
+        Source/Client/HttpRequestManager.cpp
         Source/UI/MainUI.cpp
         Source/UI/Widgets/AdaptixWidget.cpp
         Source/UI/Widgets/LogsWidget.cpp
@@ -173,9 +195,9 @@ add_executable(AdaptixClient
         Source/UI/Dialogs/DialogListener.cpp
         Source/UI/Widgets/SessionsTableWidget.cpp
         Source/UI/Dialogs/DialogAgent.cpp
+        Source/UI/Dialogs/DialogAgentData.cpp
         Source/UI/Widgets/ConsoleWidget.cpp
         Source/Agent/Agent.cpp
-        Source/Agent/AgentTableWidgetItem.cpp
         Source/Workers/LastTickWorker.cpp
         Source/Agent/Commander.cpp
         Source/UI/Widgets/DownloadsWidget.cpp
@@ -188,25 +210,28 @@ add_executable(AdaptixClient
         Source/Utils/CustomElements.cpp
         Source/Client/Settings.cpp
         Source/UI/Widgets/TunnelsWidget.cpp
-        Source/Agent/Task.cpp
-        Source/Agent/TaskTableWidgetItem.cpp
         Source/UI/Graph/SessionsGraph.cpp
         Source/UI/Graph/GraphItem.cpp
         Source/UI/Graph/GraphItemLink.cpp
         Source/UI/Graph/GraphScene.cpp
         Source/UI/Graph/LayoutTreeLeft.cpp
+        Source/UI/Graph/LayoutTreeTop.cpp
         Source/UI/Widgets/ScreenshotsWidget.cpp
         Source/UI/Dialogs/DialogTunnel.cpp
         Source/Client/TunnelEndpoint.cpp
         Source/Workers/TunnelWorker.cpp
-        Source/UI/Widgets/TerminalWidget.cpp
+        Source/Workers/SocksHandshakeWorker.cpp
+        Source/UI/Widgets/TerminalContainerWidget.cpp
         Source/Workers/TerminalWorker.cpp
+        Source/Workers/BuildWorker.cpp
         Source/UI/Dialogs/DialogDownloader.cpp
         Source/Workers/DownloaderWorker.cpp
         Source/Workers/UploaderWorker.cpp
         Source/UI/Dialogs/DialogUploader.cpp
         Source/Client/AxScript/AxScriptManager.cpp
         Source/Client/AxScript/AxScriptEngine.cpp
+        Source/Client/AxScript/AxScriptWorker.cpp
+        Source/Client/AxScript/AxUiFactory.cpp
         Source/Client/AxScript/BridgeApp.cpp
         Source/Client/AxScript/BridgeEvent.cpp
         Source/Client/AxScript/BridgeForm.cpp
@@ -218,9 +243,19 @@ add_executable(AdaptixClient
         Source/UI/Widgets/AxConsoleWidget.cpp
         Source/UI/Widgets/TargetsWidget.cpp
         Source/UI/Dialogs/DialogTarget.cpp
+        Source/UI/Dialogs/DialogSaveTask.cpp
+        Source/UI/Widgets/ChatWidget.cpp
+        Source/Utils/NonBlockingDialogs.cpp
+        Source/Utils/FontManager.cpp
+        Source/Utils/TitleBarStyle.cpp
 )
 
-target_compile_definitions(AdaptixClient PRIVATE QT_DEPRECATED_WARNINGS )
+target_compile_definitions(
+        AdaptixClient
+        PUBLIC KDDW_FRONTEND_QTWIDGETS KDDW_FRONTEND_QT BUILDING_DOCKS_LIBRARY
+        PRIVATE QT_DEPRECATED_WARNINGS QT_NO_KEYWORDS
+#        QT_NO_SIGNALS_SLOTS_KEYWORDS
+)
 
 if(UNIX)
     target_link_libraries( AdaptixClient
@@ -233,6 +268,8 @@ if(UNIX)
             Qt6::Sql
             Qt6::Qml
             OpenSSL::Crypto
+
+            kddockwidgets
 
             pthread dl
     )
@@ -248,6 +285,8 @@ elseif(APPLE)
             Qt6::Qml
             OpenSSL::Crypto
 
+            kddockwidgets
+
             pthread dl
     )
 else()
@@ -261,6 +300,8 @@ else()
             Qt6::Sql
             Qt6::Qml
 
-            wsock32 ws2_32 crypt32 iphlpapi netapi32 version winmm userenv
+            kddockwidgets
+
+            wsock32 ws2_32 crypt32 iphlpapi netapi32 version winmm userenv dwmapi
     )
 endif()
